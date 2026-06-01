@@ -20,18 +20,13 @@ def main() -> None:
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
-    ap.add_argument("--aead", action="store_true", help="Enable AEAD encryption on UDP transport")
-    ap.add_argument("--psk", default="", help="Pre-shared secret for AEAD")
+    ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
     ap.add_argument("--cipher", choices=["aesgcm", "chacha20"], default="chacha20")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock = raw_sock
-    if args.aead:
-        if not args.psk:
-            raise SystemExit("--psk is required when --aead is enabled")
-        sock = AEADDatagramSocket(raw_sock, psk=args.psk, cipher_name=args.cipher)
+    sock = AEADDatagramSocket(raw_sock, psk=args.psk, cipher_name=args.cipher)
     sock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port if args.peer_port > 0 else 40000)
 

@@ -3,12 +3,12 @@
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
 ## Security model
-- If `--aead` is not set, transport is plain USTP (no encryption).
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
   - `chacha20` (ChaCha20-Poly1305)
   - `aesgcm` (AES-256-GCM)
-- Shared secret with `--psk`
+- AEAD is mandatory in USTPS (no plaintext mode)
+- Shared secret is required with `--psk`
 
 ## Server (AEAD enabled)
 ```bash
@@ -18,7 +18,6 @@ python3 server.py \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
-  --aead \
   --psk "YOUR_SHARED_SECRET" \
   --cipher chacha20
 ```
@@ -33,7 +32,6 @@ python3 client.py \
   --output-mode tcp \
   --tcp-host 127.0.0.1 \
   --tcp-port 1238 \
-  --aead \
   --psk "YOUR_SHARED_SECRET" \
   --cipher chacha20
 ```

@@ -22,19 +22,14 @@ def main() -> None:
     ap.add_argument("--udp-unordered-live", action="store_true", help="Immediate out-of-order UDP output (may corrupt generic players)")
     ap.add_argument("--reorder-buffer-ms", type=int, default=80, help="Initial playout buffer delay for ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
-    ap.add_argument("--aead", action="store_true", help="Enable AEAD encryption on UDP transport")
-    ap.add_argument("--psk", default="", help="Pre-shared secret for AEAD")
+    ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
     ap.add_argument("--cipher", choices=["aesgcm", "chacha20"], default="chacha20")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
 
     raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    usock = raw_usock
-    if args.aead:
-        if not args.psk:
-            raise SystemExit("--psk is required when --aead is enabled")
-        usock = AEADDatagramSocket(raw_usock, psk=args.psk, cipher_name=args.cipher)
+    usock = AEADDatagramSocket(raw_usock, psk=args.psk, cipher_name=args.cipher)
     usock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port)
     recv = USTPReceiver(sock=usock, peer=peer)
