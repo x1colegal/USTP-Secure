@@ -6,7 +6,7 @@ import time
 
 from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST
 from ustp import USTPSender, parse_packet
-from aead_udp import AEADDatagramSocket
+from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
 def main() -> None:
@@ -21,12 +21,13 @@ def main() -> None:
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
-    ap.add_argument("--cipher", choices=["chacha20", "aes-256-gcm", "aes-128-gcm"], default="chacha20")
+    ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock = AEADDatagramSocket(raw_sock, psk=args.psk, cipher_name=args.cipher)
+    selected_cipher = normalize_cipher_name(args.cipher)
+    sock = AEADDatagramSocket(raw_sock, psk=args.psk, cipher_name=selected_cipher)
     sock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port if args.peer_port > 0 else 40000)
 
@@ -42,7 +43,7 @@ def main() -> None:
 
     print(
         f"[USTP-SERVER] peer={args.peer_ip} resolved={resolved_peer_ip}:{peer[1]} "
-        f"cc={'on' if args.congestion_control else 'off'}"
+        f"cc={'on' if args.congestion_control else 'off'} aead={selected_cipher}"
     )
 
     running = True

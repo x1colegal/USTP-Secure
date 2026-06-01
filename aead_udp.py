@@ -9,6 +9,15 @@ CIPHER_AES256GCM = 2
 CIPHER_CHACHA20 = 3
 
 
+def normalize_cipher_name(name: str) -> str:
+    c = (name or "").lower().strip()
+    if c in ("aes-128-gcm", "aes128", "aes128gcm"):
+        return "aes-128-gcm"
+    if c in ("aes", "aesgcm", "aes-gcm", "aes-256-gcm", "aes256", "aes256gcm"):
+        return "aes-256-gcm"
+    return "chacha20"
+
+
 def _kdf(psk: str) -> bytes:
     return hashlib.sha256(psk.encode("utf-8")).digest()
 
@@ -19,12 +28,13 @@ class AEADDatagramSocket:
 
         self.sock = sock
         base_key = _kdf(psk)
-        c = cipher_name.lower().strip()
-        if c in ("aes-128-gcm", "aes128", "aes128gcm"):
+        c = normalize_cipher_name(cipher_name)
+        self.cipher_name = c
+        if c == "aes-128-gcm":
             self.cipher_id = CIPHER_AES128GCM
             self.key = base_key[:16]
             self.aead = AESGCM(self.key)
-        elif c in ("aes", "aesgcm", "aes-gcm", "aes-256-gcm", "aes256", "aes256gcm"):
+        elif c == "aes-256-gcm":
             self.cipher_id = CIPHER_AES256GCM
             self.key = base_key
             self.aead = AESGCM(self.key)

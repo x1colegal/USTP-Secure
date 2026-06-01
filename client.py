@@ -5,7 +5,7 @@ import time
 
 from packet import TYPE_CLOSE, TYPE_DATA, TYPE_HELLO, mkp
 from ustp import USTPReceiver, parse_packet
-from aead_udp import AEADDatagramSocket
+from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
 def main() -> None:
@@ -23,13 +23,14 @@ def main() -> None:
     ap.add_argument("--reorder-buffer-ms", type=int, default=80, help="Initial playout buffer delay for ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
-    ap.add_argument("--cipher", choices=["chacha20", "aes-256-gcm", "aes-128-gcm"], default="chacha20")
+    ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
 
     raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    usock = AEADDatagramSocket(raw_usock, psk=args.psk, cipher_name=args.cipher)
+    selected_cipher = normalize_cipher_name(args.cipher)
+    usock = AEADDatagramSocket(raw_usock, psk=args.psk, cipher_name=selected_cipher)
     usock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port)
     recv = USTPReceiver(sock=usock, peer=peer)
@@ -37,6 +38,7 @@ def main() -> None:
     local_ip, local_port = usock.getsockname()
     print(f"[USTP-CLIENT] local bind {local_ip}:{local_port}")
     print(f"[USTP-CLIENT] peer {args.peer_ip} resolved={resolved_peer_ip}:{peer[1]}")
+    print(f"[USTP-CLIENT] aead cipher={selected_cipher}")
 
     out_by_pos = {}
     next_out_pos = 0
