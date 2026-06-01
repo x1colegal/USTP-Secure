@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# local scripts and runtime helpers
+*.sh
+
+# logs/temp
+*.log
+*.tmp
+*.swp
+
+# local transfer/output artifacts
+out/
+downloads/
+received/
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+
+# local notes
+*.txt
+!README.md
+!LICENSE
