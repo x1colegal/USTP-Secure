@@ -3,6 +3,7 @@
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
 ## Security model
+- If `--aead` is not set, transport is plain USTP (no encryption).
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
   - `chacha20` (ChaCha20-Poly1305)
