@@ -4,8 +4,9 @@ import hashlib
 from typing import Tuple
 
 MAGIC = b"USS1"
-CIPHER_AESGCM = 1
-CIPHER_CHACHA20 = 2
+CIPHER_AES128GCM = 1
+CIPHER_AES256GCM = 2
+CIPHER_CHACHA20 = 3
 
 
 def _kdf(psk: str) -> bytes:
@@ -17,13 +18,19 @@ class AEADDatagramSocket:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
         self.sock = sock
-        self.key = _kdf(psk)
+        base_key = _kdf(psk)
         c = cipher_name.lower().strip()
-        if c in ("aes", "aesgcm", "aes-gcm"):
-            self.cipher_id = CIPHER_AESGCM
+        if c in ("aes-128-gcm", "aes128", "aes128gcm"):
+            self.cipher_id = CIPHER_AES128GCM
+            self.key = base_key[:16]
+            self.aead = AESGCM(self.key)
+        elif c in ("aes", "aesgcm", "aes-gcm", "aes-256-gcm", "aes256", "aes256gcm"):
+            self.cipher_id = CIPHER_AES256GCM
+            self.key = base_key
             self.aead = AESGCM(self.key)
         else:
             self.cipher_id = CIPHER_CHACHA20
+            self.key = base_key
             self.aead = ChaCha20Poly1305(self.key)
 
     def bind(self, addr: Tuple[str, int]):

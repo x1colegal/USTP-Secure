@@ -21,7 +21,7 @@ def main() -> None:
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
-    ap.add_argument("--cipher", choices=["aesgcm", "chacha20"], default="chacha20")
+    ap.add_argument("--cipher", choices=["chacha20", "aes-256-gcm", "aes-128-gcm"], default="chacha20")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)

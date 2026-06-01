@@ -6,7 +6,8 @@ USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authenticati
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
   - `chacha20` (ChaCha20-Poly1305)
-  - `aesgcm` (AES-256-GCM)
+  - `aes-256-gcm`
+  - `aes-128-gcm`
 - AEAD is mandatory in USTPS (no plaintext mode)
 - Shared secret is required with `--psk`
 
@@ -44,3 +45,4 @@ tcp://127.0.0.1:1238
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
 - USTPS: same UDP transport plus AEAD encryption/authentication per packet.
+- Client exits with explicit error if no valid encrypted packets are received (wrong PSK/cipher or server offline).

@@ -23,7 +23,7 @@ def main() -> None:
     ap.add_argument("--reorder-buffer-ms", type=int, default=80, help="Initial playout buffer delay for ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
-    ap.add_argument("--cipher", choices=["aesgcm", "chacha20"], default="chacha20")
+    ap.add_argument("--cipher", choices=["chacha20", "aes-256-gcm", "aes-128-gcm"], default="chacha20")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
@@ -86,6 +86,7 @@ def main() -> None:
             usock_out.sendto(data, (args.udp_ip, args.udp_port))
 
     running = True
+    last_rx_ts = time.time()
 
     def keepalive_loop() -> None:
         while running:
@@ -99,7 +100,7 @@ def main() -> None:
             time.sleep(0.03)
 
     def recv_loop() -> None:
-        nonlocal next_out_pos, last_gap_log
+        nonlocal next_out_pos, last_gap_log, last_rx_ts
         while running:
             try:
                 raw, addr = usock.recvfrom(65535)
@@ -110,6 +111,7 @@ def main() -> None:
             pkt = parse_packet(raw)
             if not pkt:
                 continue
+            last_rx_ts = time.time()
             if pkt.pkt_type == TYPE_CLOSE:
                 continue
             if pkt.pkt_type != TYPE_DATA:
@@ -157,6 +159,8 @@ def main() -> None:
 
     try:
         while True:
+            if time.time() - last_rx_ts > 8.0:
+                raise SystemExit("No valid encrypted packets received (wrong PSK/cipher or server offline)")
             time.sleep(1.0)
     except KeyboardInterrupt:
         print("[USTP-CLIENT] Interrupted")
