@@ -43,6 +43,14 @@ class AEADDatagramSocket:
             self.key = base_key
             self.aead = ChaCha20Poly1305(self.key)
 
+        # Support decrypting packets from any supported cipher (same PSK),
+        # then adapt outbound packets to the most recently valid inbound cipher.
+        self._aead_by_id = {
+            CIPHER_AES128GCM: AESGCM(base_key[:16]),
+            CIPHER_AES256GCM: AESGCM(base_key),
+            CIPHER_CHACHA20: ChaCha20Poly1305(base_key),
+        }
+
     def bind(self, addr: Tuple[str, int]):
         self.sock.bind(addr)
 
@@ -60,14 +68,19 @@ class AEADDatagramSocket:
             if raw[:4] != MAGIC:
                 continue
             cid = raw[4]
-            if cid != self.cipher_id:
+            aead = self._aead_by_id.get(cid)
+            if aead is None:
                 continue
             nonce = raw[5:17]
             ct = raw[17:]
             try:
-                pt = self.aead.decrypt(nonce, ct, None)
+                pt = aead.decrypt(nonce, ct, None)
             except Exception:
                 continue
+            # Lock sender side to the last valid inbound cipher to avoid
+            # manual server/client cipher coordination.
+            self.cipher_id = cid
+            self.aead = aead
             return pt, addr
 
     def setsockopt(self, *args, **kwargs):
