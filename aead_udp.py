@@ -55,3 +55,6 @@ class AEADDatagramSocket:
 
     def setsockopt(self, *args, **kwargs):
         return self.sock.setsockopt(*args, **kwargs)
+
+    def getsockname(self):
+        return self.sock.getsockname()
