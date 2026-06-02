@@ -130,6 +130,10 @@ def main() -> None:
                     continue
                 if args.peer_port and addr[1] != args.peer_port:
                     continue
+                session = None
+                resend_reply = None
+                create_pub = None
+                now = time.time()
 
                 with sessions_lock:
                     session = sessions.get(addr)
@@ -137,18 +141,36 @@ def main() -> None:
                         client_pub = parse_client_pub(pkt.payload)
                         if client_pub is not None:
                             if session is not None:
-                                session.last_hello_ts = time.time()
+                                session.last_hello_ts = now
                                 if client_pub == session.client_pub:
-                                    sock.send_plain(mkp(TYPE_HELLO, payload=session.session_reply).to_bytes(), addr)
-                                continue
-                            session = new_session(addr, client_pub)
-                            sessions[addr] = session
-                            continue
-                    if session is None:
-                        continue
-                    session.last_hello_ts = time.time()
-                    if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
-                        session.sender.on_control(pkt)
+                                    resend_reply = session.session_reply
+                                else:
+                                    create_pub = client_pub
+                            else:
+                                create_pub = client_pub
+                        elif session is not None:
+                            session.last_hello_ts = now
+                    elif session is not None:
+                        session.last_hello_ts = now
+
+                if resend_reply is not None:
+                    sock.send_plain(mkp(TYPE_HELLO, payload=resend_reply).to_bytes(), addr)
+                    continue
+
+                if create_pub is not None:
+                    new = new_session(addr, create_pub)
+                    with sessions_lock:
+                        old = sessions.get(addr)
+                        if old is not None:
+                            old.sender.stop()
+                            sock.clear_peer(addr)
+                        sessions[addr] = new
+                    continue
+
+                if session is None:
+                    continue
+                if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
+                    session.sender.on_control(pkt)
             except Exception:
                 print("[USTP-SERVER] control-loop error:")
                 traceback.print_exc()
@@ -182,24 +204,33 @@ def main() -> None:
 
             now = time.time()
             with sessions_lock:
-                for addr, session in list(sessions.items()):
-                    try:
-                        if (now - session.last_hello_ts) > 20.0:
-                            session.sender.stop()
-                            sock.clear_peer(addr)
-                            del sessions[addr]
-                            print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
-                            continue
-                        session.sender.queue_payload(chunk, stream_pos=session.next_stream_pos)
-                        session.next_stream_pos += len(chunk)
-                    except Exception:
-                        print(f"[USTP-SERVER] session send error {addr[0]}:{addr[1]}:")
-                        traceback.print_exc()
-                        try:
-                            session.sender.stop()
-                            sock.clear_peer(addr)
-                        finally:
-                            sessions.pop(addr, None)
+                snapshot = list(sessions.items())
+
+            for addr, session in snapshot:
+                try:
+                    if (now - session.last_hello_ts) > 20.0:
+                        with sessions_lock:
+                            current = sessions.get(addr)
+                            if current is session:
+                                session.sender.stop()
+                                sock.clear_peer(addr)
+                                del sessions[addr]
+                                print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
+                        continue
+                    stream_pos = session.next_stream_pos
+                    session.next_stream_pos += len(chunk)
+                    session.sender.queue_payload(chunk, stream_pos=stream_pos)
+                except Exception:
+                    print(f"[USTP-SERVER] session send error {addr[0]}:{addr[1]}:")
+                    traceback.print_exc()
+                    with sessions_lock:
+                        current = sessions.get(addr)
+                        if current is session:
+                            try:
+                                session.sender.stop()
+                                sock.clear_peer(addr)
+                            finally:
+                                sessions.pop(addr, None)
     except KeyboardInterrupt:
         print("[USTP-SERVER] Interrupted")
     finally:
