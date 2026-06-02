@@ -4,6 +4,7 @@ import socket
 import subprocess
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 
 from cryptography.hazmat.primitives import serialization
@@ -108,26 +109,30 @@ def main() -> None:
             except Exception:
                 continue
 
-            pkt = parse_packet(raw)
-            if not pkt:
-                continue
-            if args.peer_port and addr[1] != args.peer_port:
-                continue
-
-            with sessions_lock:
-                session = sessions.get(addr)
-                if session is None and pkt.pkt_type == TYPE_HELLO:
-                    client_pub = parse_client_pub(pkt.payload)
-                    if client_pub is None:
-                        continue
-                    session = new_session(addr, client_pub)
-                    sessions[addr] = session
-                if session is None:
+            try:
+                pkt = parse_packet(raw)
+                if not pkt:
                     continue
-                if pkt.pkt_type == TYPE_HELLO:
-                    session.last_hello_ts = time.time()
-                if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
-                    session.sender.on_control(pkt)
+                if args.peer_port and addr[1] != args.peer_port:
+                    continue
+
+                with sessions_lock:
+                    session = sessions.get(addr)
+                    if session is None and pkt.pkt_type == TYPE_HELLO:
+                        client_pub = parse_client_pub(pkt.payload)
+                        if client_pub is None:
+                            continue
+                        session = new_session(addr, client_pub)
+                        sessions[addr] = session
+                    if session is None:
+                        continue
+                    if pkt.pkt_type == TYPE_HELLO:
+                        session.last_hello_ts = time.time()
+                    if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
+                        session.sender.on_control(pkt)
+            except Exception:
+                print("[USTP-SERVER] control-loop error:")
+                traceback.print_exc()
 
     threading.Thread(target=ctrl_loop, daemon=True).start()
 
@@ -159,14 +164,23 @@ def main() -> None:
             now = time.time()
             with sessions_lock:
                 for addr, session in list(sessions.items()):
-                    if (now - session.last_hello_ts) > 20.0:
-                        session.sender.stop()
-                        sock.clear_peer(addr)
-                        del sessions[addr]
-                        print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
-                        continue
-                    session.sender.queue_payload(chunk, stream_pos=session.next_stream_pos)
-                    session.next_stream_pos += len(chunk)
+                    try:
+                        if (now - session.last_hello_ts) > 20.0:
+                            session.sender.stop()
+                            sock.clear_peer(addr)
+                            del sessions[addr]
+                            print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
+                            continue
+                        session.sender.queue_payload(chunk, stream_pos=session.next_stream_pos)
+                        session.next_stream_pos += len(chunk)
+                    except Exception:
+                        print(f"[USTP-SERVER] session send error {addr[0]}:{addr[1]}:")
+                        traceback.print_exc()
+                        try:
+                            session.sender.stop()
+                            sock.clear_peer(addr)
+                        finally:
+                            sessions.pop(addr, None)
     except KeyboardInterrupt:
         print("[USTP-SERVER] Interrupted")
     finally:
