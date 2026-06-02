@@ -4,6 +4,10 @@ USTPS means **UDP Speedy Transmission Protocol Secure**.
 
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
+Status: **Beta**
+
+USTPS is no longer just a proof of concept. It is currently in the Beta phase.
+
 ## Security model
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
