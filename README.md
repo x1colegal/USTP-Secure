@@ -10,11 +10,12 @@ USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authenticati
   - `aes-128-gcm`
 - AEAD is mandatory in USTPS (no plaintext mode)
 - Shared secret is required with `--psk`
+- Servers support multiple clients and choose a random supported outbound cipher per client session.
 
 ## Server (AEAD enabled)
 ```bash
 python3 server.py \
-  --peer-ip <CLIENT_IP_OR_DOMAIN> \
+  --peer-ip 0.0.0.0 \
   --peer-port 0 \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \

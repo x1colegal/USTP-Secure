@@ -43,22 +43,33 @@ class AEADDatagramSocket:
             self.key = base_key
             self.aead = ChaCha20Poly1305(self.key)
 
-        # Support decrypting packets from any supported cipher (same PSK),
-        # then adapt outbound packets to the most recently valid inbound cipher.
         self._aead_by_id = {
             CIPHER_AES128GCM: AESGCM(base_key[:16]),
             CIPHER_AES256GCM: AESGCM(base_key),
             CIPHER_CHACHA20: ChaCha20Poly1305(base_key),
         }
+        self._cipher_id_by_name = {
+            "aes-128-gcm": CIPHER_AES128GCM,
+            "aes-256-gcm": CIPHER_AES256GCM,
+            "chacha20": CIPHER_CHACHA20,
+        }
+        self._peer_cipher: dict[Tuple[str, int], int] = {}
 
     def bind(self, addr: Tuple[str, int]):
         self.sock.bind(addr)
 
     def sendto(self, data: bytes, addr: Tuple[str, int]):
+        cid = self._peer_cipher.get(addr, self.cipher_id)
+        aead = self._aead_by_id[cid]
         nonce = os.urandom(12)
-        ct = self.aead.encrypt(nonce, data, None)
-        pkt = MAGIC + bytes([self.cipher_id]) + nonce + ct
+        ct = aead.encrypt(nonce, data, None)
+        pkt = MAGIC + bytes([cid]) + nonce + ct
         return self.sock.sendto(pkt, addr)
+
+    def set_peer_cipher(self, addr: Tuple[str, int], cipher_name: str) -> str:
+        c = normalize_cipher_name(cipher_name)
+        self._peer_cipher[addr] = self._cipher_id_by_name[c]
+        return c
 
     def recvfrom(self, bufsize: int):
         while True:
@@ -77,10 +88,6 @@ class AEADDatagramSocket:
                 pt = aead.decrypt(nonce, ct, None)
             except Exception:
                 continue
-            # Lock sender side to the last valid inbound cipher to avoid
-            # manual server/client cipher coordination.
-            self.cipher_id = cid
-            self.aead = aead
             return pt, addr
 
     def setsockopt(self, *args, **kwargs):
