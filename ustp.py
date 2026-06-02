@@ -33,6 +33,7 @@ class USTPSender:
 
         self.lock = threading.Lock()
         self.running = False
+        self.wakeup = threading.Event()
         self.cwnd = 4.0
         self.ssthresh = max(8.0, float(window) / 2.0)
         self.stats_acks = 0
@@ -41,11 +42,13 @@ class USTPSender:
 
     def start(self) -> None:
         self.running = True
+        threading.Thread(target=self._pump_loop, daemon=True).start()
         threading.Thread(target=self._retx_loop, daemon=True).start()
         print("[USTP-SENDER] started")
 
     def stop(self) -> None:
         self.running = False
+        self.wakeup.set()
 
     def reset_session(self) -> None:
         with self.lock:
@@ -64,7 +67,7 @@ class USTPSender:
             return
         with self.lock:
             self.pending.append((payload, stream_pos))
-        self.flush()
+        self.wakeup.set()
 
     def _send_raw(self, raw: bytes) -> None:
         if self.loss_percent > 0:
@@ -79,7 +82,7 @@ class USTPSender:
 
     def flush(self) -> None:
         burst = 0
-        while burst < 256:
+        while burst < 64:
             with self.lock:
                 in_flight = len(self.sent)
                 eff_window = self.window
@@ -116,17 +119,27 @@ class USTPSender:
             self._send_raw(raw)
             burst += 1
 
+    def _pump_loop(self) -> None:
+        while self.running:
+            self.wakeup.wait(0.02)
+            self.wakeup.clear()
+            self.flush()
+
     def on_control(self, pkt: USTPPacket) -> None:
         if pkt.pkt_type == TYPE_ACK:
+            removed = False
             with self.lock:
                 if pkt.seq in self.sent:
                     del self.sent[pkt.seq]
+                    removed = True
                     self.stats_acks += 1
                     if self.congestion_control:
                         if self.cwnd < self.ssthresh:
                             self.cwnd += 1.0
                         else:
                             self.cwnd += 1.0 / max(1.0, self.cwnd)
+            if removed:
+                self.wakeup.set()
             return
 
         if pkt.pkt_type == TYPE_RETRANSMIT_REQUEST:
@@ -140,7 +153,7 @@ class USTPSender:
                 if missing in self.sent and missing not in self.retx_set:
                     self.retx_set.add(missing)
                     self.retx_queue.append(missing)
-            self.flush()
+            self.wakeup.set()
 
     def _retx_loop(self) -> None:
         while self.running:
@@ -161,7 +174,7 @@ class USTPSender:
                 with self.lock:
                     self.stats_rto += len(timed_out)
                 print(f"[USTP-SENDER] RTO queued {len(timed_out)}")
-                self.flush()
+                self.wakeup.set()
             time.sleep(0.03)
 
     def get_stats(self) -> Dict[str, float]:
