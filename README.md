@@ -1,5 +1,7 @@
 # USTP-Secure (USTPS)
 
+USTPS means **UDP Speedy Transmission Protocol Secure**.
+
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
 ## Security model
@@ -9,10 +11,10 @@ USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authenticati
   - `aes-256-gcm`
   - `aes-128-gcm`
 - AEAD is mandatory in USTPS (no plaintext mode)
-- Shared secret is required with `--psk`
+- No static PSK is used.
+- Each client performs an X25519 key exchange when it joins.
+- Each client gets a separate ephemeral AEAD session key.
 - Servers support multiple clients.
-- `--psk` is the bootstrap AEAD secret.
-- Every client receives its own derived session PSK after the encrypted HELLO handshake.
 - The server chooses a random supported outbound cipher per client session.
 
 ## Server (AEAD enabled)
@@ -23,7 +25,6 @@ python3 server.py \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
-  --psk "YOUR_SHARED_SECRET" \
   --cipher chacha20
 ```
 
@@ -37,7 +38,6 @@ python3 client.py \
   --output-mode tcp \
   --tcp-host 127.0.0.1 \
   --tcp-port 1238 \
-  --psk "YOUR_SHARED_SECRET" \
   --cipher chacha20
 ```
 
@@ -49,4 +49,4 @@ tcp://127.0.0.1:1238
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
 - USTPS: same UDP transport plus AEAD encryption/authentication per packet.
-- Client exits with explicit error if no valid encrypted packets are received (wrong PSK/cipher or server offline).
+- Client exits with explicit error if no valid encrypted packets are received (server offline or handshake failed).

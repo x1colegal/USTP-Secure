@@ -1,6 +1,4 @@
 import argparse
-import hashlib
-import os
 import random
 import socket
 import subprocess
@@ -8,13 +6,18 @@ import threading
 import time
 from dataclasses import dataclass
 
-from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, mkp
 from ustp import USTPSender, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
 SUPPORTED_CIPHERS = ("chacha20", "aes-256-gcm", "aes-128-gcm")
-HELLO_PREFIX = b"USTPS-HELLO1\0"
+HELLO_PREFIX = b"USTPS-KEX1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
 
 
@@ -27,23 +30,26 @@ class ClientSession:
     next_stream_pos: int = 0
 
 
-def derive_session_psk(base_psk: str, client_nonce: bytes, server_nonce: bytes) -> bytes:
-    h = hashlib.sha256()
-    h.update(b"USTPS-session-v1\0")
-    h.update(base_psk.encode("utf-8"))
-    h.update(b"\0")
-    h.update(client_nonce)
-    h.update(server_nonce)
-    return h.digest()
+def public_bytes(pubkey) -> bytes:
+    return pubkey.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
 
 
-def parse_client_nonce(payload: bytes) -> bytes | None:
+def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> bytes:
+    return HKDF(
+        algorithm=SHA256(),
+        length=32,
+        salt=client_pub + server_pub,
+        info=b"USTPS-X25519-session-v1",
+    ).derive(shared)
+
+
+def parse_client_pub(payload: bytes) -> bytes | None:
     if not payload.startswith(HELLO_PREFIX):
         return None
     rest = payload[len(HELLO_PREFIX) :]
-    if len(rest) < 16:
+    if len(rest) < 32:
         return None
-    return rest[:16]
+    return rest[:32]
 
 
 def main() -> None:
@@ -57,13 +63,12 @@ def main() -> None:
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
-    ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     args = ap.parse_args()
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     selected_cipher = normalize_cipher_name(args.cipher)
-    sock = AEADDatagramSocket(raw_sock, psk=args.psk, cipher_name=selected_cipher)
+    sock = AEADDatagramSocket(raw_sock, cipher_name=selected_cipher)
     sock.bind((args.bind_ip, args.bind_port))
     sessions: dict[tuple[str, int], ClientSession] = {}
     sessions_lock = threading.Lock()
@@ -75,12 +80,13 @@ def main() -> None:
 
     running = True
 
-    def new_session(addr: tuple[str, int], client_nonce: bytes) -> ClientSession:
+    def new_session(addr: tuple[str, int], client_pub_raw: bytes) -> ClientSession:
         cipher = random.choice(SUPPORTED_CIPHERS)
-        server_nonce = os.urandom(16)
-        session_psk = derive_session_psk(args.psk, client_nonce, server_nonce)
-        sock.set_peer_cipher(addr, selected_cipher)
-        sock.sendto(mkp(TYPE_HELLO, payload=SESSION_PREFIX + server_nonce + cipher.encode("ascii")).to_bytes(), addr)
+        server_private = x25519.X25519PrivateKey.generate()
+        server_pub = public_bytes(server_private.public_key())
+        client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
+        session_psk = derive_session_key(server_private.exchange(client_pub), client_pub_raw, server_pub)
+        sock.send_plain(mkp(TYPE_HELLO, payload=SESSION_PREFIX + server_pub + cipher.encode("ascii")).to_bytes(), addr)
         sock.set_peer_psk(addr, session_psk, cipher)
         sender = USTPSender(
             sock=sock,
@@ -109,10 +115,10 @@ def main() -> None:
             with sessions_lock:
                 session = sessions.get(addr)
                 if session is None and pkt.pkt_type == TYPE_HELLO:
-                    client_nonce = parse_client_nonce(pkt.payload)
-                    if client_nonce is None:
+                    client_pub = parse_client_pub(pkt.payload)
+                    if client_pub is None:
                         continue
-                    session = new_session(addr, client_nonce)
+                    session = new_session(addr, client_pub)
                     sessions[addr] = session
                 if session is None:
                     continue

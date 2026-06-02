@@ -1,27 +1,33 @@
 import argparse
-import hashlib
-import os
 import socket
 import threading
 import time
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from packet import TYPE_CLOSE, TYPE_DATA, TYPE_HELLO, mkp
 from ustp import USTPReceiver, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
-HELLO_PREFIX = b"USTPS-HELLO1\0"
+HELLO_PREFIX = b"USTPS-KEX1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
 
 
-def derive_session_psk(base_psk: str, client_nonce: bytes, server_nonce: bytes) -> bytes:
-    h = hashlib.sha256()
-    h.update(b"USTPS-session-v1\0")
-    h.update(base_psk.encode("utf-8"))
-    h.update(b"\0")
-    h.update(client_nonce)
-    h.update(server_nonce)
-    return h.digest()
+def public_bytes(pubkey) -> bytes:
+    return pubkey.public_bytes(encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+
+
+def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> bytes:
+    return HKDF(
+        algorithm=SHA256(),
+        length=32,
+        salt=client_pub + server_pub,
+        info=b"USTPS-X25519-session-v1",
+    ).derive(shared)
 
 
 def main() -> None:
@@ -38,7 +44,6 @@ def main() -> None:
     ap.add_argument("--udp-unordered-live", action="store_true", help="Immediate out-of-order UDP output (may corrupt generic players)")
     ap.add_argument("--reorder-buffer-ms", type=int, default=80, help="Initial playout buffer delay for ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
-    ap.add_argument("--psk", required=True, help="Pre-shared secret for mandatory AEAD")
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     args = ap.parse_args()
 
@@ -46,11 +51,12 @@ def main() -> None:
 
     raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     selected_cipher = normalize_cipher_name(args.cipher)
-    usock = AEADDatagramSocket(raw_usock, psk=args.psk, cipher_name=selected_cipher)
+    usock = AEADDatagramSocket(raw_usock, cipher_name=selected_cipher)
     usock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port)
     recv = USTPReceiver(sock=usock, peer=peer)
-    client_nonce = os.urandom(16)
+    client_private = x25519.X25519PrivateKey.generate()
+    client_pub = public_bytes(client_private.public_key())
     session_ready = False
 
     local_ip, local_port = usock.getsockname()
@@ -113,9 +119,12 @@ def main() -> None:
             if session_ready:
                 hello_payload = (48).to_bytes(2, "big")
             else:
-                hello_payload = HELLO_PREFIX + client_nonce
+                hello_payload = HELLO_PREFIX + client_pub
             hello = mkp(TYPE_HELLO, payload=hello_payload)
-            usock.sendto(hello.to_bytes(), peer)
+            if session_ready:
+                usock.sendto(hello.to_bytes(), peer)
+            else:
+                usock.send_plain(hello.to_bytes(), peer)
             time.sleep(args.keepalive_interval)
 
     def nack_loop() -> None:
@@ -138,10 +147,15 @@ def main() -> None:
             last_rx_ts = time.time()
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                 rest = pkt.payload[len(SESSION_PREFIX) :]
-                if len(rest) >= 16:
-                    server_nonce = rest[:16]
-                    session_cipher = rest[16:].decode("ascii", "replace") or selected_cipher
-                    usock.set_peer_psk(peer, derive_session_psk(args.psk, client_nonce, server_nonce), session_cipher)
+                if len(rest) >= 32:
+                    server_pub = rest[:32]
+                    session_cipher = rest[32:].decode("ascii", "replace") or selected_cipher
+                    server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
+                    usock.set_peer_psk(
+                        peer,
+                        derive_session_key(client_private.exchange(server_public), client_pub, server_pub),
+                        session_cipher,
+                    )
                     session_ready = True
                     print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
                 continue
