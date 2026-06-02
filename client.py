@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import os
 import socket
 import threading
 import time
@@ -6,6 +8,20 @@ import time
 from packet import TYPE_CLOSE, TYPE_DATA, TYPE_HELLO, mkp
 from ustp import USTPReceiver, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
+
+
+HELLO_PREFIX = b"USTPS-HELLO1\0"
+SESSION_PREFIX = b"USTPS-SESSION1\0"
+
+
+def derive_session_psk(base_psk: str, client_nonce: bytes, server_nonce: bytes) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"USTPS-session-v1\0")
+    h.update(base_psk.encode("utf-8"))
+    h.update(b"\0")
+    h.update(client_nonce)
+    h.update(server_nonce)
+    return h.digest()
 
 
 def main() -> None:
@@ -34,6 +50,8 @@ def main() -> None:
     usock.bind((args.bind_ip, args.bind_port))
     peer = (resolved_peer_ip, args.peer_port)
     recv = USTPReceiver(sock=usock, peer=peer)
+    client_nonce = os.urandom(16)
+    session_ready = False
 
     local_ip, local_port = usock.getsockname()
     print(f"[USTP-CLIENT] local bind {local_ip}:{local_port}")
@@ -92,7 +110,11 @@ def main() -> None:
 
     def keepalive_loop() -> None:
         while running:
-            hello = mkp(TYPE_HELLO, payload=(48).to_bytes(2, "big"))
+            if session_ready:
+                hello_payload = (48).to_bytes(2, "big")
+            else:
+                hello_payload = HELLO_PREFIX + client_nonce
+            hello = mkp(TYPE_HELLO, payload=hello_payload)
             usock.sendto(hello.to_bytes(), peer)
             time.sleep(args.keepalive_interval)
 
@@ -102,7 +124,7 @@ def main() -> None:
             time.sleep(0.03)
 
     def recv_loop() -> None:
-        nonlocal next_out_pos, last_gap_log, last_rx_ts
+        nonlocal next_out_pos, last_gap_log, last_rx_ts, session_ready
         while running:
             try:
                 raw, addr = usock.recvfrom(65535)
@@ -114,6 +136,15 @@ def main() -> None:
             if not pkt:
                 continue
             last_rx_ts = time.time()
+            if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
+                rest = pkt.payload[len(SESSION_PREFIX) :]
+                if len(rest) >= 16:
+                    server_nonce = rest[:16]
+                    session_cipher = rest[16:].decode("ascii", "replace") or selected_cipher
+                    usock.set_peer_psk(peer, derive_session_psk(args.psk, client_nonce, server_nonce), session_cipher)
+                    session_ready = True
+                    print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
+                continue
             if pkt.pkt_type == TYPE_CLOSE:
                 continue
             if pkt.pkt_type != TYPE_DATA:

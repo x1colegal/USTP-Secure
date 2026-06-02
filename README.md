@@ -10,7 +10,10 @@ USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authenticati
   - `aes-128-gcm`
 - AEAD is mandatory in USTPS (no plaintext mode)
 - Shared secret is required with `--psk`
-- Servers support multiple clients and choose a random supported outbound cipher per client session.
+- Servers support multiple clients.
+- `--psk` is the bootstrap AEAD secret.
+- Every client receives its own derived session PSK after the encrypted HELLO handshake.
+- The server chooses a random supported outbound cipher per client session.
 
 ## Server (AEAD enabled)
 ```bash

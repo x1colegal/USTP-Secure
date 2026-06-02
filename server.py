@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import os
 import random
 import socket
 import subprocess
@@ -12,6 +14,8 @@ from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
 SUPPORTED_CIPHERS = ("chacha20", "aes-256-gcm", "aes-128-gcm")
+HELLO_PREFIX = b"USTPS-HELLO1\0"
+SESSION_PREFIX = b"USTPS-SESSION1\0"
 
 
 @dataclass
@@ -19,7 +23,27 @@ class ClientSession:
     sender: USTPSender
     last_hello_ts: float
     cipher: str
+    session_psk: bytes
     next_stream_pos: int = 0
+
+
+def derive_session_psk(base_psk: str, client_nonce: bytes, server_nonce: bytes) -> bytes:
+    h = hashlib.sha256()
+    h.update(b"USTPS-session-v1\0")
+    h.update(base_psk.encode("utf-8"))
+    h.update(b"\0")
+    h.update(client_nonce)
+    h.update(server_nonce)
+    return h.digest()
+
+
+def parse_client_nonce(payload: bytes) -> bytes | None:
+    if not payload.startswith(HELLO_PREFIX):
+        return None
+    rest = payload[len(HELLO_PREFIX) :]
+    if len(rest) < 16:
+        return None
+    return rest[:16]
 
 
 def main() -> None:
@@ -51,9 +75,13 @@ def main() -> None:
 
     running = True
 
-    def new_session(addr: tuple[str, int]) -> ClientSession:
+    def new_session(addr: tuple[str, int], client_nonce: bytes) -> ClientSession:
         cipher = random.choice(SUPPORTED_CIPHERS)
-        sock.set_peer_cipher(addr, cipher)
+        server_nonce = os.urandom(16)
+        session_psk = derive_session_psk(args.psk, client_nonce, server_nonce)
+        sock.set_peer_cipher(addr, selected_cipher)
+        sock.sendto(mkp(TYPE_HELLO, payload=SESSION_PREFIX + server_nonce + cipher.encode("ascii")).to_bytes(), addr)
+        sock.set_peer_psk(addr, session_psk, cipher)
         sender = USTPSender(
             sock=sock,
             peer=addr,
@@ -64,7 +92,7 @@ def main() -> None:
         )
         sender.start()
         print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
-        return ClientSession(sender=sender, last_hello_ts=time.time(), cipher=cipher)
+        return ClientSession(sender=sender, last_hello_ts=time.time(), cipher=cipher, session_psk=session_psk)
 
     def ctrl_loop() -> None:
         nonlocal running
@@ -81,7 +109,10 @@ def main() -> None:
             with sessions_lock:
                 session = sessions.get(addr)
                 if session is None and pkt.pkt_type == TYPE_HELLO:
-                    session = new_session(addr)
+                    client_nonce = parse_client_nonce(pkt.payload)
+                    if client_nonce is None:
+                        continue
+                    session = new_session(addr, client_nonce)
                     sessions[addr] = session
                 if session is None:
                     continue
@@ -122,6 +153,7 @@ def main() -> None:
                 for addr, session in list(sessions.items()):
                     if (now - session.last_hello_ts) > 5.0:
                         session.sender.stop()
+                        sock.clear_peer(addr)
                         del sessions[addr]
                         print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
                         continue
