@@ -126,8 +126,7 @@ def main() -> None:
                         sessions[addr] = session
                     if session is None:
                         continue
-                    if pkt.pkt_type == TYPE_HELLO:
-                        session.last_hello_ts = time.time()
+                    session.last_hello_ts = time.time()
                     if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
                         session.sender.on_control(pkt)
             except Exception:

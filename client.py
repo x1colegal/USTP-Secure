@@ -58,6 +58,7 @@ def main() -> None:
     client_private = x25519.X25519PrivateKey.generate()
     client_pub = public_bytes(client_private.public_key())
     session_ready = False
+    last_kex_ts = 0.0
 
     local_ip, local_port = usock.getsockname()
     print(f"[USTP-CLIENT] local bind {local_ip}:{local_port}")
@@ -113,8 +114,10 @@ def main() -> None:
 
     running = True
     last_rx_ts = time.time()
+    last_valid_data_ts = 0.0
 
     def keepalive_loop() -> None:
+        nonlocal last_kex_ts
         while running:
             if session_ready:
                 hello_payload = (48).to_bytes(2, "big")
@@ -125,6 +128,7 @@ def main() -> None:
                 usock.sendto(hello.to_bytes(), peer)
             else:
                 usock.send_plain(hello.to_bytes(), peer)
+                last_kex_ts = time.time()
             time.sleep(args.keepalive_interval)
 
     def nack_loop() -> None:
@@ -133,7 +137,7 @@ def main() -> None:
             time.sleep(0.03)
 
     def recv_loop() -> None:
-        nonlocal next_out_pos, last_gap_log, last_rx_ts, session_ready
+        nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, session_ready
         while running:
             try:
                 raw, addr = usock.recvfrom(65535)
@@ -157,6 +161,7 @@ def main() -> None:
                         session_cipher,
                     )
                     session_ready = True
+                    last_valid_data_ts = time.time()
                     print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:
@@ -164,6 +169,7 @@ def main() -> None:
             if pkt.pkt_type != TYPE_DATA:
                 continue
 
+            last_valid_data_ts = time.time()
             recv.handle_data(pkt)
             if args.output_mode == "udp" and args.udp_unordered_live:
                 output_send(pkt.payload)
@@ -206,8 +212,11 @@ def main() -> None:
 
     try:
         while True:
-            if time.time() - last_rx_ts > 8.0:
-                raise SystemExit("No valid encrypted packets received (wrong PSK/cipher or server offline)")
+            now = time.time()
+            if not session_ready and now - last_rx_ts > 12.0:
+                raise SystemExit("No USTPS session established (server offline or handshake failed)")
+            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 20.0:
+                raise SystemExit("No valid encrypted data received for 20s (server offline or session lost)")
             time.sleep(1.0)
     except KeyboardInterrupt:
         print("[USTP-CLIENT] Interrupted")
