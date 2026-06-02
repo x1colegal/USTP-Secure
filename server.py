@@ -28,6 +28,9 @@ class ClientSession:
     last_hello_ts: float
     cipher: str
     session_psk: bytes
+    client_pub: bytes
+    server_pub: bytes
+    session_reply: bytes
     next_stream_pos: int = 0
     created_ts: float = 0.0
 
@@ -88,7 +91,8 @@ def main() -> None:
         server_pub = public_bytes(server_private.public_key())
         client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
         session_psk = derive_session_key(server_private.exchange(client_pub), client_pub_raw, server_pub)
-        sock.send_plain(mkp(TYPE_HELLO, payload=SESSION_PREFIX + client_pub_raw + server_pub + cipher.encode("ascii")).to_bytes(), addr)
+        session_reply = SESSION_PREFIX + client_pub_raw + server_pub + cipher.encode("ascii")
+        sock.send_plain(mkp(TYPE_HELLO, payload=session_reply).to_bytes(), addr)
         sock.set_peer_psk(addr, session_psk, cipher)
         sender = USTPSender(
             sock=sock,
@@ -101,7 +105,16 @@ def main() -> None:
         sender.start()
         print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
         now = time.time()
-        return ClientSession(sender=sender, last_hello_ts=now, cipher=cipher, session_psk=session_psk, created_ts=now)
+        return ClientSession(
+            sender=sender,
+            last_hello_ts=now,
+            cipher=cipher,
+            session_psk=session_psk,
+            client_pub=client_pub_raw,
+            server_pub=server_pub,
+            session_reply=session_reply,
+            created_ts=now,
+        )
 
     def ctrl_loop() -> None:
         nonlocal running
@@ -124,9 +137,10 @@ def main() -> None:
                         client_pub = parse_client_pub(pkt.payload)
                         if client_pub is not None:
                             if session is not None:
-                                print(f"[USTP-SERVER] rekey client {addr[0]}:{addr[1]}")
-                                session.sender.stop()
-                                sock.clear_peer(addr)
+                                session.last_hello_ts = time.time()
+                                if client_pub == session.client_pub:
+                                    sock.send_plain(mkp(TYPE_HELLO, payload=session.session_reply).to_bytes(), addr)
+                                continue
                             session = new_session(addr, client_pub)
                             sessions[addr] = session
                             continue

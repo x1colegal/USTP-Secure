@@ -116,19 +116,7 @@ def main() -> None:
     running = True
     last_rx_ts = time.time()
     last_valid_data_ts = 0.0
-    last_rekey_ts = 0.0
-
-    def rotate_key() -> None:
-        nonlocal client_private, client_pub, session_ready, last_kex_ts, last_rekey_ts, last_rx_ts
-        with key_lock:
-            client_private = x25519.X25519PrivateKey.generate()
-            client_pub = public_bytes(client_private.public_key())
-            session_ready = False
-            last_kex_ts = 0.0
-            last_rx_ts = time.time()
-            last_rekey_ts = time.time()
-            usock.clear_peer(peer)
-        print("[USTP-CLIENT] rekey requested")
+    last_stall_log_ts = 0.0
 
     def keepalive_loop() -> None:
         nonlocal last_kex_ts
@@ -233,8 +221,9 @@ def main() -> None:
             now = time.time()
             if not session_ready and now - last_rx_ts > 12.0:
                 raise SystemExit("No USTPS session established (server offline or handshake failed)")
-            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 6.0 and now - last_rekey_ts > 6.0:
-                rotate_key()
+            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 6.0 and now - last_stall_log_ts > 6.0:
+                print("[USTP-CLIENT] no data for 6s; keeping the same session key and waiting")
+                last_stall_log_ts = now
             if session_ready and last_valid_data_ts and now - last_valid_data_ts > 60.0:
                 raise SystemExit("No valid encrypted data received for 60s (server offline or session lost)")
             time.sleep(1.0)
