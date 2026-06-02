@@ -8,6 +8,10 @@ Status: **Beta**
 
 USTPS is no longer just a proof of concept. It is currently in the Beta phase.
 
+USTPS can be used for many kinds of applications and transports.
+
+This repository, however, is focused specifically on **streaming over USTPS**.
+
 ## Security model
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
@@ -105,3 +109,7 @@ tcp://127.0.0.1:1238
 - USTP: reliable UDP transport, no encryption by default.
 - USTPS: same UDP transport plus AEAD encryption/authentication per packet.
 - Client exits with explicit error if no valid encrypted packets are received (server offline or handshake failed).
+
+## Related projects
+- `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTPS:
+  `https://github.com/x1colegal/USSH`
