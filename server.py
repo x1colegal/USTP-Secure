@@ -29,6 +29,7 @@ class ClientSession:
     cipher: str
     session_psk: bytes
     next_stream_pos: int = 0
+    created_ts: float = 0.0
 
 
 def public_bytes(pubkey) -> bytes:
@@ -87,7 +88,7 @@ def main() -> None:
         server_pub = public_bytes(server_private.public_key())
         client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
         session_psk = derive_session_key(server_private.exchange(client_pub), client_pub_raw, server_pub)
-        sock.send_plain(mkp(TYPE_HELLO, payload=SESSION_PREFIX + server_pub + cipher.encode("ascii")).to_bytes(), addr)
+        sock.send_plain(mkp(TYPE_HELLO, payload=SESSION_PREFIX + client_pub_raw + server_pub + cipher.encode("ascii")).to_bytes(), addr)
         sock.set_peer_psk(addr, session_psk, cipher)
         sender = USTPSender(
             sock=sock,
@@ -99,7 +100,8 @@ def main() -> None:
         )
         sender.start()
         print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
-        return ClientSession(sender=sender, last_hello_ts=time.time(), cipher=cipher, session_psk=session_psk)
+        now = time.time()
+        return ClientSession(sender=sender, last_hello_ts=now, cipher=cipher, session_psk=session_psk, created_ts=now)
 
     def ctrl_loop() -> None:
         nonlocal running
@@ -118,12 +120,16 @@ def main() -> None:
 
                 with sessions_lock:
                     session = sessions.get(addr)
-                    if session is None and pkt.pkt_type == TYPE_HELLO:
+                    if pkt.pkt_type == TYPE_HELLO:
                         client_pub = parse_client_pub(pkt.payload)
-                        if client_pub is None:
+                        if client_pub is not None:
+                            if session is not None:
+                                print(f"[USTP-SERVER] rekey client {addr[0]}:{addr[1]}")
+                                session.sender.stop()
+                                sock.clear_peer(addr)
+                            session = new_session(addr, client_pub)
+                            sessions[addr] = session
                             continue
-                        session = new_session(addr, client_pub)
-                        sessions[addr] = session
                     if session is None:
                         continue
                     session.last_hello_ts = time.time()
