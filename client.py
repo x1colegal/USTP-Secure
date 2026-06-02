@@ -35,7 +35,7 @@ def main() -> None:
     ap.add_argument("--peer-ip", required=True)
     ap.add_argument("--peer-port", type=int, default=40001)
     ap.add_argument("--bind-ip", default="0.0.0.0")
-    ap.add_argument("--bind-port", type=int, default=40000)
+    ap.add_argument("--bind-port", type=int, default=0)
     ap.add_argument("--tcp-host", default="127.0.0.1")
     ap.add_argument("--tcp-port", type=int, default=1238)
     ap.add_argument("--output-mode", choices=["tcp", "udp"], default="tcp")

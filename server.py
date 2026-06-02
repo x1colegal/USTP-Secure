@@ -111,6 +111,8 @@ def main() -> None:
             pkt = parse_packet(raw)
             if not pkt:
                 continue
+            if args.peer_port and addr[1] != args.peer_port:
+                continue
 
             with sessions_lock:
                 session = sessions.get(addr)
@@ -157,7 +159,7 @@ def main() -> None:
             now = time.time()
             with sessions_lock:
                 for addr, session in list(sessions.items()):
-                    if (now - session.last_hello_ts) > 5.0:
+                    if (now - session.last_hello_ts) > 20.0:
                         session.sender.stop()
                         sock.clear_peer(addr)
                         del sessions[addr]

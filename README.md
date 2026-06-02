@@ -34,7 +34,7 @@ python3 client.py \
   --peer-ip <SERVER_IP_OR_DOMAIN> \
   --peer-port 40001 \
   --bind-ip 0.0.0.0 \
-  --bind-port 40000 \
+  --bind-port 0 \
   --output-mode tcp \
   --tcp-host 127.0.0.1 \
   --tcp-port 1238 \
