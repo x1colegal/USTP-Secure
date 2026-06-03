@@ -83,14 +83,17 @@ def main() -> None:
         tsock.listen(5)
 
         def accept_loop() -> None:
-            while True:
+            while running:
                 try:
                     c, a = tsock.accept()
                 except Exception:
-                    continue
+                    if running:
+                        continue
+                    break
                 with cl_lock:
                     clients.append(c)
-                print(f"[USTP-CLIENT] TCP client {a}")
+                if running:
+                    print(f"[USTP-CLIENT] TCP client {a}")
 
         def output_send(data: bytes) -> None:
             dead = []
@@ -117,6 +120,7 @@ def main() -> None:
     last_rx_ts = time.time()
     last_valid_data_ts = 0.0
     last_stall_log_ts = 0.0
+    threads: list[threading.Thread] = []
 
     def keepalive_loop() -> None:
         nonlocal last_kex_ts
@@ -161,14 +165,16 @@ def main() -> None:
                     session_cipher = rest[64:].decode("ascii", "replace") or selected_cipher
                     with key_lock:
                         if echoed_client_pub != client_pub:
-                            print("[USTP-CLIENT] ignored stale session response")
+                            if running:
+                                print("[USTP-CLIENT] ignored stale session response")
                             continue
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
                     usock.set_peer_psk(peer, session_key, session_cipher)
                     session_ready = True
                     last_valid_data_ts = time.time()
-                    print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
+                    if running:
+                        print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:
                 continue
@@ -193,23 +199,27 @@ def main() -> None:
                 if pkt.stream_pos > next_out_pos:
                     now = time.time()
                     if now - last_gap_log >= 0.25:
-                        print(
-                            f"[USTP-CLIENT] GAP next_pos={next_out_pos} "
-                            f"arrived_pos={pkt.stream_pos} seq={pkt.seq} "
-                            f"reorder_q={len(out_by_pos)}"
-                        )
+                        if running:
+                            print(
+                                f"[USTP-CLIENT] GAP next_pos={next_out_pos} "
+                                f"arrived_pos={pkt.stream_pos} seq={pkt.seq} "
+                                f"reorder_q={len(out_by_pos)}"
+                            )
                         last_gap_log = now
                 elif pkt.stream_pos < next_out_pos:
-                    print(
-                        f"[USTP-CLIENT] RECOVERY seq={pkt.seq} pos={pkt.stream_pos} "
-                        f"reconstructed_until={next_out_pos}"
-                    )
+                    if running:
+                        print(
+                            f"[USTP-CLIENT] RECOVERY seq={pkt.seq} pos={pkt.stream_pos} "
+                            f"reconstructed_until={next_out_pos}"
+                        )
 
     if args.output_mode == "tcp":
-        threading.Thread(target=accept_loop, daemon=True).start()
-    threading.Thread(target=keepalive_loop, daemon=True).start()
-    threading.Thread(target=nack_loop, daemon=True).start()
-    threading.Thread(target=recv_loop, daemon=True).start()
+        threads.append(threading.Thread(target=accept_loop, daemon=True, name="ustps-accept"))
+    threads.append(threading.Thread(target=keepalive_loop, daemon=True, name="ustps-keepalive"))
+    threads.append(threading.Thread(target=nack_loop, daemon=True, name="ustps-nack"))
+    threads.append(threading.Thread(target=recv_loop, daemon=True, name="ustps-recv"))
+    for thread in threads:
+        thread.start()
 
     if args.output_mode == "tcp":
         print(f"[USTP-CLIENT] TCP output on tcp://{args.tcp_host}:{args.tcp_port}")
@@ -222,7 +232,8 @@ def main() -> None:
             if not session_ready and now - last_rx_ts > 12.0:
                 raise SystemExit("No USTPS session established (server offline or handshake failed)")
             if session_ready and last_valid_data_ts and now - last_valid_data_ts > 6.0 and now - last_stall_log_ts > 6.0:
-                print("[USTP-CLIENT] no data for 6s; keeping the same session key and waiting")
+                if running:
+                    print("[USTP-CLIENT] no data for 6s; keeping the same session key and waiting")
                 last_stall_log_ts = now
             if session_ready and last_valid_data_ts and now - last_valid_data_ts > 60.0:
                 raise SystemExit("No valid encrypted data received for 60s (server offline or session lost)")
@@ -231,6 +242,31 @@ def main() -> None:
         print("[USTP-CLIENT] Interrupted")
     finally:
         running = False
+        try:
+            raw_usock.close()
+        except Exception:
+            pass
+        try:
+            usock_out.close()
+        except Exception:
+            pass
+        if args.output_mode == "tcp":
+            try:
+                tsock.close()
+            except Exception:
+                pass
+            with cl_lock:
+                for c in clients:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass
+                clients.clear()
+        for thread in threads:
+            try:
+                thread.join(timeout=0.2)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
