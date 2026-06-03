@@ -42,7 +42,7 @@ def main() -> None:
     ap.add_argument("--udp-ip", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=1238)
     ap.add_argument("--udp-unordered-live", action="store_true", help="Immediate out-of-order UDP output (may corrupt generic players)")
-    ap.add_argument("--reorder-buffer-ms", type=int, default=80, help="Initial playout buffer delay for ordered UDP mode")
+    ap.add_argument("--reorder-buffer-ms", type=int, default=200, help="Initial local playout buffer delay for TCP output or ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     args = ap.parse_args()
@@ -183,6 +183,8 @@ def main() -> None:
             with reorder_lock:
                 out_by_pos[pkt.stream_pos] = pkt.payload
                 while next_out_pos in out_by_pos:
+                    if args.output_mode == "tcp" and time.time() < ordered_release_at:
+                        break
                     if args.output_mode == "udp" and not args.udp_unordered_live and time.time() < ordered_release_at:
                         break
                     chunk = out_by_pos.pop(next_out_pos)
