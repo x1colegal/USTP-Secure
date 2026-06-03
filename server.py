@@ -72,6 +72,8 @@ def main() -> None:
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
+    ap.add_argument("--stalled-progress-timeout", type=float, default=20.0, help="Drop a session if ACK progress stops for too long while queues keep growing")
+    ap.add_argument("--max-pending-packets", type=int, default=4096, help="Per-session pending queue hard limit before the session is considered stalled")
     args = ap.parse_args()
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -247,6 +249,20 @@ def main() -> None:
 
             for addr, session in snapshot:
                 try:
+                    stats = session.sender.get_stats()
+                    if stats["pending"] > args.max_pending_packets and stats["last_progress_age"] > args.stalled_progress_timeout:
+                        with sessions_lock:
+                            current = sessions.get(addr)
+                            if current is session:
+                                session.sender.stop()
+                                sock.clear_peer(addr)
+                                del sessions[addr]
+                                print(
+                                    f"[USTP-SERVER] stalled session removed {addr[0]}:{addr[1]} "
+                                    f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
+                                    f"last_progress={stats['last_progress_age']:.1f}s"
+                                )
+                        continue
                     if (now - session.last_seen_ts) > 180.0:
                         with sessions_lock:
                             current = sessions.get(addr)

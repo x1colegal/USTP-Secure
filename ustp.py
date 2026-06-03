@@ -39,6 +39,10 @@ class USTPSender:
         self.stats_acks = 0
         self.stats_rto = 0
         self.nack_ts: Dict[int, float] = {}
+        now = time.time()
+        self.last_ack_ts = now
+        self.last_send_ts = now
+        self.last_progress_ts = now
 
     def start(self) -> None:
         self.running = True
@@ -117,6 +121,9 @@ class USTPSender:
                     return
 
             self._send_raw(raw)
+            now = time.time()
+            with self.lock:
+                self.last_send_ts = now
             burst += 1
 
     def _pump_loop(self) -> None:
@@ -133,6 +140,9 @@ class USTPSender:
                     del self.sent[pkt.seq]
                     removed = True
                     self.stats_acks += 1
+                    now = time.time()
+                    self.last_ack_ts = now
+                    self.last_progress_ts = now
                     if self.congestion_control:
                         if self.cwnd < self.ssthresh:
                             self.cwnd += 1.0
@@ -184,7 +194,11 @@ class USTPSender:
                 "acks": float(self.stats_acks),
                 "rto": float(self.stats_rto),
                 "inflight": float(len(self.sent)),
+                "pending": float(len(self.pending)),
                 "cwnd": float(self.cwnd),
+                "last_ack_age": max(0.0, time.time() - self.last_ack_ts),
+                "last_send_age": max(0.0, time.time() - self.last_send_ts),
+                "last_progress_age": max(0.0, time.time() - self.last_progress_ts),
             }
 
 
