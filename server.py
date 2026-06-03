@@ -28,6 +28,7 @@ class ClientSession:
     addr: tuple[str, int]
     sender: USTPSender
     last_hello_ts: float
+    last_seen_ts: float
     cipher: str
     session_psk: bytes
     client_pub: bytes
@@ -111,6 +112,7 @@ def main() -> None:
             addr=addr,
             sender=sender,
             last_hello_ts=now,
+            last_seen_ts=now,
             cipher=cipher,
             session_psk=session_psk,
             client_pub=client_pub_raw,
@@ -171,12 +173,14 @@ def main() -> None:
                                     migrate_session(old_addr, addr, old_session)
                                     session = old_session
                                     session.last_hello_ts = now
+                                    session.last_seen_ts = now
                                 else:
                                     create_pub = client_pub
                         elif session is not None:
                             session.last_hello_ts = now
+                            session.last_seen_ts = now
                     elif session is not None:
-                        session.last_hello_ts = now
+                        session.last_seen_ts = now
 
                 if create_pub is not None:
                     new = new_session(addr, create_pub)
@@ -243,14 +247,14 @@ def main() -> None:
 
             for addr, session in snapshot:
                 try:
-                    if (now - session.last_hello_ts) > 20.0:
+                    if (now - session.last_seen_ts) > 180.0:
                         with sessions_lock:
                             current = sessions.get(addr)
                             if current is session:
                                 session.sender.stop()
                                 sock.clear_peer(addr)
                                 del sessions[addr]
-                                print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]}")
+                                print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]} last_seen={now - session.last_seen_ts:.1f}s")
                         continue
                     stream_pos = session.next_stream_pos
                     session.next_stream_pos += len(chunk)
