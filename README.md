@@ -100,6 +100,13 @@ python3 client.py \
   --cipher chacha20
 ```
 
+## About `--udp-unordered-live`
+- `--udp-unordered-live` is dangerous and generally not recommended for normal media players.
+- In that mode, payloads are forwarded immediately in raw arrival order.
+- If a packet is retransmitted later, a generic player may treat that recovered payload as if it were a brand-new frame or packet instead of late data that belongs earlier in the logical stream.
+- That can cause visible corruption, duplicated playback artifacts, decoder confusion, or unstable playback.
+- For normal player compatibility, prefer local `TCP` output or ordered UDP output with a reorder buffer.
+
 VLC:
 ```text
 tcp://127.0.0.1:1238
