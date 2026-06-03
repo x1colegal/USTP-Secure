@@ -25,6 +25,7 @@ VIDEO_USER_AGENT = "USTPS Video Mode"
 
 @dataclass
 class ClientSession:
+    addr: tuple[str, int]
     sender: USTPSender
     last_hello_ts: float
     cipher: str
@@ -107,6 +108,7 @@ def main() -> None:
         print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
         now = time.time()
         return ClientSession(
+            addr=addr,
             sender=sender,
             last_hello_ts=now,
             cipher=cipher,
@@ -116,6 +118,23 @@ def main() -> None:
             session_reply=session_reply,
             created_ts=now,
         )
+
+    def find_session_by_client_pub(client_pub_raw: bytes) -> tuple[tuple[str, int], ClientSession] | tuple[None, None]:
+        for existing_addr, existing_session in sessions.items():
+            if existing_session.client_pub == client_pub_raw:
+                return existing_addr, existing_session
+        return None, None
+
+    def migrate_session(old_addr: tuple[str, int], new_addr: tuple[str, int], session: ClientSession) -> None:
+        if old_addr == new_addr:
+            return
+        sock.clear_peer(old_addr)
+        sock.set_peer_psk(new_addr, session.session_psk, session.cipher)
+        session.sender.peer = new_addr
+        session.addr = new_addr
+        sessions.pop(old_addr, None)
+        sessions[new_addr] = session
+        print(f"[USTP-SERVER] client migrated {old_addr[0]}:{old_addr[1]} -> {new_addr[0]}:{new_addr[1]}")
 
     def ctrl_loop() -> None:
         nonlocal running
@@ -132,7 +151,6 @@ def main() -> None:
                 if args.peer_port and addr[1] != args.peer_port:
                     continue
                 session = None
-                resend_reply = None
                 create_pub = None
                 now = time.time()
 
@@ -144,19 +162,21 @@ def main() -> None:
                             if session is not None:
                                 session.last_hello_ts = now
                                 if client_pub == session.client_pub:
-                                    resend_reply = session.session_reply
+                                    pass
                                 else:
                                     create_pub = client_pub
                             else:
-                                create_pub = client_pub
+                                old_addr, old_session = find_session_by_client_pub(client_pub)
+                                if old_session is not None:
+                                    migrate_session(old_addr, addr, old_session)
+                                    session = old_session
+                                    session.last_hello_ts = now
+                                else:
+                                    create_pub = client_pub
                         elif session is not None:
                             session.last_hello_ts = now
                     elif session is not None:
                         session.last_hello_ts = now
-
-                if resend_reply is not None:
-                    sock.send_plain(mkp(TYPE_HELLO, payload=resend_reply).to_bytes(), addr)
-                    continue
 
                 if create_pub is not None:
                     new = new_session(addr, create_pub)

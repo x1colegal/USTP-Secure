@@ -125,17 +125,11 @@ def main() -> None:
     def keepalive_loop() -> None:
         nonlocal last_kex_ts
         while running:
-            if session_ready:
-                hello_payload = (48).to_bytes(2, "big")
-            else:
-                with key_lock:
-                    hello_payload = HELLO_PREFIX + client_pub
+            with key_lock:
+                hello_payload = HELLO_PREFIX + client_pub
             hello = mkp(TYPE_HELLO, payload=hello_payload)
-            if session_ready:
-                usock.sendto(hello.to_bytes(), peer)
-            else:
-                usock.send_plain(hello.to_bytes(), peer)
-                last_kex_ts = time.time()
+            usock.send_plain(hello.to_bytes(), peer)
+            last_kex_ts = time.time()
             time.sleep(args.keepalive_interval)
 
     def nack_loop() -> None:
