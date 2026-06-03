@@ -20,6 +20,7 @@ from aead_udp import AEADDatagramSocket, normalize_cipher_name
 SUPPORTED_CIPHERS = ("chacha20", "aes-256-gcm", "aes-128-gcm")
 HELLO_PREFIX = b"USTPS-KEX1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
+VIDEO_USER_AGENT = "USTPS Video Mode"
 
 
 @dataclass
@@ -177,7 +178,21 @@ def main() -> None:
 
     threading.Thread(target=ctrl_loop, daemon=True).start()
 
-    cmd = ["ffmpeg", "-re", "-i", args.video, "-c", "copy", "-mpegts_flags", "+resend_headers", "-f", "mpegts", "-"]
+    cmd = [
+        "ffmpeg",
+        "-re",
+        "-user_agent",
+        VIDEO_USER_AGENT,
+        "-i",
+        args.video,
+        "-c",
+        "copy",
+        "-mpegts_flags",
+        "+resend_headers",
+        "-f",
+        "mpegts",
+        "-",
+    ]
     print("[USTP-SERVER]", " ".join(cmd))
 
     proc = None
