@@ -48,13 +48,20 @@ def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> b
     ).derive(shared)
 
 
-def parse_client_pub(payload: bytes) -> bytes | None:
+def parse_client_hello(payload: bytes) -> tuple[bytes, str | None] | None:
     if not payload.startswith(HELLO_PREFIX):
         return None
     rest = payload[len(HELLO_PREFIX) :]
     if len(rest) < 32:
         return None
-    return rest[:32]
+    client_pub = rest[:32]
+    cipher = None
+    if len(rest) > 32:
+        try:
+            cipher = normalize_cipher_name(rest[32:].decode("ascii", "replace"))
+        except Exception:
+            cipher = None
+    return client_pub, cipher
 
 
 def load_or_create_host_key(path: str) -> x25519.X25519PrivateKey:
@@ -117,7 +124,7 @@ def main() -> None:
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
-    ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
+    ap.add_argument("--cipher", default="auto", help="auto | chacha20 | aes-256-gcm | aes-128-gcm")
     ap.add_argument("--host-key-file", default=os.path.expanduser("~/.ustps_host_key"))
     ap.add_argument("--regen-key", action="store_true", help="Regenerate the persistent server host key after interactive confirmation")
     ap.add_argument("--stalled-progress-timeout", type=float, default=20.0, help="Drop a session if ACK progress stops for too long while queues keep growing")
@@ -125,7 +132,7 @@ def main() -> None:
     args = ap.parse_args()
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    selected_cipher = normalize_cipher_name(args.cipher)
+    selected_cipher = None if args.cipher == "auto" else normalize_cipher_name(args.cipher)
     maybe_regen_host_key(args.host_key_file, args.regen_key)
     host_private = load_or_create_host_key(args.host_key_file)
     host_public = public_bytes(host_private.public_key())
@@ -136,13 +143,13 @@ def main() -> None:
 
     print(
         f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} "
-        f"cc={'on' if args.congestion_control else 'off'} default-aead={selected_cipher} multi-client=on"
+        f"cc={'on' if args.congestion_control else 'off'} default-aead={selected_cipher or 'auto'} multi-client=on"
     )
 
     running = True
 
-    def new_session(addr: tuple[str, int], client_pub_raw: bytes) -> ClientSession:
-        cipher = selected_cipher
+    def new_session(addr: tuple[str, int], client_pub_raw: bytes, requested_cipher: str | None) -> ClientSession:
+        cipher = selected_cipher or requested_cipher or "chacha20"
         client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
         session_psk = derive_session_key(host_private.exchange(client_pub), client_pub_raw, host_public)
         session_reply = SESSION_PREFIX + client_pub_raw + host_public + cipher.encode("ascii")
@@ -210,14 +217,15 @@ def main() -> None:
                 with sessions_lock:
                     session = sessions.get(addr)
                     if pkt.pkt_type == TYPE_HELLO:
-                        client_pub = parse_client_pub(pkt.payload)
-                        if client_pub is not None:
+                        parsed = parse_client_hello(pkt.payload)
+                        if parsed is not None:
+                            client_pub, requested_cipher = parsed
                             if session is not None:
                                 session.last_hello_ts = now
                                 if client_pub == session.client_pub:
                                     pass
                                 else:
-                                    create_pub = client_pub
+                                    create_pub = (client_pub, requested_cipher)
                             else:
                                 old_addr, old_session = find_session_by_client_pub(client_pub)
                                 if old_session is not None:
@@ -226,7 +234,7 @@ def main() -> None:
                                     session.last_hello_ts = now
                                     session.last_seen_ts = now
                                 else:
-                                    create_pub = client_pub
+                                    create_pub = (client_pub, requested_cipher)
                         elif session is not None:
                             session.last_hello_ts = now
                             session.last_seen_ts = now
@@ -234,7 +242,7 @@ def main() -> None:
                         session.last_seen_ts = now
 
                 if create_pub is not None:
-                    new = new_session(addr, create_pub)
+                    new = new_session(addr, create_pub[0], create_pub[1])
                     with sessions_lock:
                         old = sessions.get(addr)
                         if old is not None:

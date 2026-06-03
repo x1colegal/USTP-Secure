@@ -177,7 +177,7 @@ def main() -> None:
         nonlocal last_kex_ts
         while running:
             with key_lock:
-                hello_payload = HELLO_PREFIX + client_pub
+                hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
             hello = mkp(TYPE_HELLO, payload=hello_payload)
             usock.send_plain(hello.to_bytes(), peer)
             last_kex_ts = time.time()

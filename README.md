@@ -23,7 +23,8 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Each client performs an X25519 key exchange when it joins.
 - Each client gets a separate ephemeral AEAD session key.
 - Servers support multiple clients.
-- The server uses the exact cipher selected with `--cipher`.
+- If `--cipher` is set on the server, the server uses that exact cipher.
+- If `--cipher` is omitted or set to `auto`, the server uses the cipher requested by the client.
 - Clients reject unexpected cipher negotiation.
 - TOFU (Trust On First Use) is enabled on the client to detect unexpected server key changes after the first connection.
 - The server keeps a persistent X25519 host key in `~/.ustps_host_key` by default so TOFU remains stable across reconnects and restarts.
