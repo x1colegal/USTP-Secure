@@ -23,7 +23,10 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Each client performs an X25519 key exchange when it joins.
 - Each client gets a separate ephemeral AEAD session key.
 - Servers support multiple clients.
-- The server chooses a random supported outbound cipher per client session.
+- The server uses the exact cipher selected with `--cipher`.
+- Clients reject unexpected cipher negotiation.
+- TOFU (Trust On First Use) is enabled on the client to detect unexpected server key changes after the first connection.
+- The server keeps a persistent X25519 host key in `~/.ustps_host_key` by default so TOFU remains stable across reconnects and restarts.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
@@ -124,6 +127,11 @@ python3 client.py \
   --tcp-port 1238 \
   --cipher chacha20
 ```
+
+Notes:
+- The default playout/reorder delay is now `350ms`.
+- The client stores the first seen server X25519 public key in `~/.ustps_known_hosts.json`.
+- If that key changes later, the client aborts with a TOFU mismatch error instead of silently trusting the new key.
 
 ## About `--udp-unordered-live`
 - `--udp-unordered-live` is dangerous and generally not recommended for normal media players.

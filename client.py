@@ -1,4 +1,6 @@
 import argparse
+import json
+import os
 import socket
 import threading
 import time
@@ -30,6 +32,40 @@ def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> b
     ).derive(shared)
 
 
+def load_tofu(path: str) -> dict[str, str]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    return {}
+
+
+def save_tofu(path: str, data: dict[str, str]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def check_tofu(path: str, peer_label: str, server_pub: bytes) -> None:
+    db = load_tofu(path)
+    fp = server_pub.hex()
+    known = db.get(peer_label)
+    if known is None:
+        db[peer_label] = fp
+        save_tofu(path, db)
+        print(f"[USTP-CLIENT] TOFU trust established for {peer_label}")
+        return
+    if known != fp:
+        raise SystemExit(f"TOFU mismatch for {peer_label}: possible MITM or server key change")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Client: USTP/UDP -> TCP or UDP output")
     ap.add_argument("--peer-ip", required=True)
@@ -42,12 +78,14 @@ def main() -> None:
     ap.add_argument("--udp-ip", default="127.0.0.1")
     ap.add_argument("--udp-port", type=int, default=1238)
     ap.add_argument("--udp-unordered-live", action="store_true", help="Immediate out-of-order UDP output (may corrupt generic players)")
-    ap.add_argument("--reorder-buffer-ms", type=int, default=200, help="Initial local playout buffer delay for TCP output or ordered UDP mode")
+    ap.add_argument("--reorder-buffer-ms", type=int, default=350, help="Initial local playout buffer delay for TCP output or ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
+    ap.add_argument("--tofu-file", default=os.path.expanduser("~/.ustps_known_hosts.json"))
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
+    tofu_label = f"{args.peer_ip}:{args.peer_port}"
 
     raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     selected_cipher = normalize_cipher_name(args.cipher)
@@ -162,6 +200,11 @@ def main() -> None:
                             if running:
                                 print("[USTP-CLIENT] ignored stale session response")
                             continue
+                        if session_cipher != selected_cipher:
+                            raise SystemExit(
+                                f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}"
+                            )
+                        check_tofu(args.tofu_file, tofu_label, server_pub)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
                     usock.set_peer_psk(peer, session_key, session_cipher)

@@ -1,5 +1,5 @@
 import argparse
-import random
+import os
 import socket
 import subprocess
 import threading
@@ -15,9 +15,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, mkp
 from ustp import USTPSender, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
-
-
-SUPPORTED_CIPHERS = ("chacha20", "aes-256-gcm", "aes-128-gcm")
 HELLO_PREFIX = b"USTPS-KEX1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
 VIDEO_USER_AGENT = "USTPS Video Mode"
@@ -60,6 +57,28 @@ def parse_client_pub(payload: bytes) -> bytes | None:
     return rest[:32]
 
 
+def load_or_create_host_key(path: str) -> x25519.X25519PrivateKey:
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        if len(raw) == 32:
+            return x25519.X25519PrivateKey.from_private_bytes(raw)
+    except FileNotFoundError:
+        pass
+    key = x25519.X25519PrivateKey.generate()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    return key
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Server: FFmpeg -> USTP/UDP")
     ap.add_argument("--peer-ip", default="0.0.0.0", help="Compatibility option; server accepts every valid AEAD client")
@@ -72,12 +91,15 @@ def main() -> None:
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
+    ap.add_argument("--host-key-file", default=os.path.expanduser("~/.ustps_host_key"))
     ap.add_argument("--stalled-progress-timeout", type=float, default=20.0, help="Drop a session if ACK progress stops for too long while queues keep growing")
     ap.add_argument("--max-pending-packets", type=int, default=4096, help="Per-session pending queue hard limit before the session is considered stalled")
     args = ap.parse_args()
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     selected_cipher = normalize_cipher_name(args.cipher)
+    host_private = load_or_create_host_key(args.host_key_file)
+    host_public = public_bytes(host_private.public_key())
     sock = AEADDatagramSocket(raw_sock, cipher_name=selected_cipher)
     sock.bind((args.bind_ip, args.bind_port))
     sessions: dict[tuple[str, int], ClientSession] = {}
@@ -91,12 +113,10 @@ def main() -> None:
     running = True
 
     def new_session(addr: tuple[str, int], client_pub_raw: bytes) -> ClientSession:
-        cipher = random.choice(SUPPORTED_CIPHERS)
-        server_private = x25519.X25519PrivateKey.generate()
-        server_pub = public_bytes(server_private.public_key())
+        cipher = selected_cipher
         client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
-        session_psk = derive_session_key(server_private.exchange(client_pub), client_pub_raw, server_pub)
-        session_reply = SESSION_PREFIX + client_pub_raw + server_pub + cipher.encode("ascii")
+        session_psk = derive_session_key(host_private.exchange(client_pub), client_pub_raw, host_public)
+        session_reply = SESSION_PREFIX + client_pub_raw + host_public + cipher.encode("ascii")
         sock.send_plain(mkp(TYPE_HELLO, payload=session_reply).to_bytes(), addr)
         sock.set_peer_psk(addr, session_psk, cipher)
         sender = USTPSender(
@@ -118,7 +138,7 @@ def main() -> None:
             cipher=cipher,
             session_psk=session_psk,
             client_pub=client_pub_raw,
-            server_pub=server_pub,
+            server_pub=host_public,
             session_reply=session_reply,
             created_ts=now,
         )
