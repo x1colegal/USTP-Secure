@@ -87,6 +87,31 @@ python3 server.py \
   --cipher chacha20
 ```
 
+## About `--loss`
+- `--loss` simulates outbound packet loss on the server side for testing recovery behavior.
+- Value range: `0` to `100`
+- Example:
+
+```bash
+python3 server.py \
+  --peer-ip 0.0.0.0 \
+  --peer-port 0 \
+  --bind-ip 0.0.0.0 \
+  --bind-port 40001 \
+  --video "<HLS_URL_OR_LOCAL_FILE>" \
+  --cipher chacha20 \
+  --loss 40
+```
+
+- `--loss 0` means no simulated loss.
+- `--loss 40` means the server randomly drops about 40% of its outbound packets before they leave the process.
+- This is useful for validating:
+  - retransmission behavior
+  - gap detection
+  - ACK/NACK handling
+  - playback resilience under controlled packet loss
+- In normal real-world usage, leave `--loss` at `0`.
+
 ## Client (AEAD enabled)
 ```bash
 python3 client.py \
