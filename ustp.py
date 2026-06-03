@@ -153,6 +153,7 @@ class USTPSender:
                 if missing in self.sent and missing not in self.retx_set:
                     self.retx_set.add(missing)
                     self.retx_queue.append(missing)
+                    print(f"[USTP-SENDER] peer requested retransmit of seq={missing}")
             self.wakeup.set()
 
     def _retx_loop(self) -> None:
@@ -288,6 +289,7 @@ class USTPReceiver:
             self.nack_ts[s] = now
             nack = mkp(TYPE_RETRANSMIT_REQUEST, seq=s)
             self.sock.sendto(nack.to_bytes(), self.peer)
+            print(f"[USTP-RECV] missing seq={s}, requesting retransmit")
             sent += 1
             if sent >= 6:
                 break
