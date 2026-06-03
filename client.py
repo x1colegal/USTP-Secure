@@ -231,8 +231,10 @@ def main() -> None:
                 if running:
                     print("[USTP-CLIENT] no data for 6s; keeping the same session key and waiting")
                 last_stall_log_ts = now
-            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 60.0:
-                raise SystemExit("No valid encrypted data received for 60s (server offline or session lost)")
+            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 60.0 and now - last_stall_log_ts > 6.0:
+                if running:
+                    print("[USTP-CLIENT] no data for 60s; session kept alive, still waiting for stream")
+                last_stall_log_ts = now
             time.sleep(1.0)
     except KeyboardInterrupt:
         print("[USTP-CLIENT] Interrupted")
