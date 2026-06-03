@@ -79,6 +79,33 @@ def load_or_create_host_key(path: str) -> x25519.X25519PrivateKey:
     return key
 
 
+def create_new_host_key(path: str) -> x25519.X25519PrivateKey:
+    key = x25519.X25519PrivateKey.generate()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    return key
+
+
+def maybe_regen_host_key(path: str, enabled: bool) -> None:
+    if not enabled:
+        return
+    if not os.isatty(0):
+        raise SystemExit("--regen-key requires interactive confirmation")
+    answer = input(f"Regenerate USTPS host key at {path}? Existing clients will see a TOFU mismatch. [y/N] ").strip().lower()
+    if answer not in ("y", "yes"):
+        raise SystemExit("USTPS host key regeneration cancelled")
+    create_new_host_key(path)
+    print(f"[USTP-SERVER] regenerated host key at {path}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Server: FFmpeg -> USTP/UDP")
     ap.add_argument("--peer-ip", default="0.0.0.0", help="Compatibility option; server accepts every valid AEAD client")
@@ -92,12 +119,14 @@ def main() -> None:
     ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     ap.add_argument("--host-key-file", default=os.path.expanduser("~/.ustps_host_key"))
+    ap.add_argument("--regen-key", action="store_true", help="Regenerate the persistent server host key after interactive confirmation")
     ap.add_argument("--stalled-progress-timeout", type=float, default=20.0, help="Drop a session if ACK progress stops for too long while queues keep growing")
     ap.add_argument("--max-pending-packets", type=int, default=4096, help="Per-session pending queue hard limit before the session is considered stalled")
     args = ap.parse_args()
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     selected_cipher = normalize_cipher_name(args.cipher)
+    maybe_regen_host_key(args.host_key_file, args.regen_key)
     host_private = load_or_create_host_key(args.host_key_file)
     host_public = public_bytes(host_private.public_key())
     sock = AEADDatagramSocket(raw_sock, cipher_name=selected_cipher)

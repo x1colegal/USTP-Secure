@@ -27,6 +27,8 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Clients reject unexpected cipher negotiation.
 - TOFU (Trust On First Use) is enabled on the client to detect unexpected server key changes after the first connection.
 - The server keeps a persistent X25519 host key in `~/.ustps_host_key` by default so TOFU remains stable across reconnects and restarts.
+- A normal server restart does not change the host key.
+- Use `--regen-key` on the server only when you intentionally want to rotate that host key.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
@@ -132,6 +134,8 @@ Notes:
 - The default playout/reorder delay is now `350ms`.
 - The client stores the first seen server X25519 public key in `~/.ustps_known_hosts.json`.
 - If that key changes later, the client aborts with a TOFU mismatch error instead of silently trusting the new key.
+- If you intentionally rotated the server host key, run the client with `--regen-key` to allow replacing the stored TOFU key after interactive confirmation.
+- TOFU entries are stored per `<peer-ip-or-domain>:<peer-port>`, so a different server at a different address/port is treated as a different host identity.
 
 ## About `--udp-unordered-live`
 - `--udp-unordered-live` is dangerous and generally not recommended for normal media players.

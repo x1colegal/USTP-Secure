@@ -53,7 +53,14 @@ def save_tofu(path: str, data: dict[str, str]) -> None:
     os.replace(tmp, path)
 
 
-def check_tofu(path: str, peer_label: str, server_pub: bytes) -> None:
+def confirm_regen(peer_label: str) -> bool:
+    if not os.isatty(0):
+        return False
+    answer = input(f"TOFU key changed for {peer_label}. Accept and replace stored key? [y/N] ").strip().lower()
+    return answer in ("y", "yes")
+
+
+def check_tofu(path: str, peer_label: str, server_pub: bytes, allow_regen: bool = False) -> None:
     db = load_tofu(path)
     fp = server_pub.hex()
     known = db.get(peer_label)
@@ -63,6 +70,11 @@ def check_tofu(path: str, peer_label: str, server_pub: bytes) -> None:
         print(f"[USTP-CLIENT] TOFU trust established for {peer_label}")
         return
     if known != fp:
+        if allow_regen and confirm_regen(peer_label):
+            db[peer_label] = fp
+            save_tofu(path, db)
+            print(f"[USTP-CLIENT] TOFU key replaced for {peer_label}")
+            return
         raise SystemExit(f"TOFU mismatch for {peer_label}: possible MITM or server key change")
 
 
@@ -82,6 +94,7 @@ def main() -> None:
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
     ap.add_argument("--tofu-file", default=os.path.expanduser("~/.ustps_known_hosts.json"))
+    ap.add_argument("--regen-key", action="store_true", help="Allow replacing a stored TOFU server key after interactive confirmation")
     args = ap.parse_args()
 
     resolved_peer_ip = socket.gethostbyname(args.peer_ip)
@@ -204,7 +217,7 @@ def main() -> None:
                             raise SystemExit(
                                 f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}"
                             )
-                        check_tofu(args.tofu_file, tofu_label, server_pub)
+                        check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
                     usock.set_peer_psk(peer, session_key, session_cipher)
