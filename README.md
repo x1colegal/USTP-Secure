@@ -12,6 +12,11 @@ USTPS can be used for many kinds of applications and transports.
 
 This repository, however, is focused specifically on **streaming over USTPS**.
 
+## Build note
+- Built with `Codex` using `GPT-5.4 (Low)`.
+- Verified without freezing at `--loss 33`.
+- Test path: `Brazil -> Canada` with about `140ms` RTT.
+
 ## Security model
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
