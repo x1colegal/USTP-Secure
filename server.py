@@ -1,5 +1,6 @@
 import argparse
 import os
+import shlex
 import socket
 import subprocess
 import threading
@@ -119,6 +120,11 @@ def main() -> None:
     ap.add_argument("--bind-ip", default="0.0.0.0")
     ap.add_argument("--bind-port", type=int, default=40001)
     ap.add_argument("--video", required=True)
+    ap.add_argument(
+        "--video-parameters",
+        default="",
+        help="Optional ffmpeg parameters to use instead of the default '-c copy -mpegts_flags +resend_headers'",
+    )
     ap.add_argument("--window", type=int, default=512)
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
@@ -260,6 +266,12 @@ def main() -> None:
 
     threading.Thread(target=ctrl_loop, daemon=True).start()
 
+    ffmpeg_video_args = shlex.split(args.video_parameters) if args.video_parameters.strip() else [
+        "-c",
+        "copy",
+        "-mpegts_flags",
+        "+resend_headers",
+    ]
     cmd = [
         "ffmpeg",
         "-re",
@@ -267,10 +279,7 @@ def main() -> None:
         VIDEO_USER_AGENT,
         "-i",
         args.video,
-        "-c",
-        "copy",
-        "-mpegts_flags",
-        "+resend_headers",
+        *ffmpeg_video_args,
         "-f",
         "mpegts",
         "-",

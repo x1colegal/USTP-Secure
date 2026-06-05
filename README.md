@@ -97,6 +97,23 @@ python3 server.py \
   --cipher chacha20
 ```
 
+If you want custom ffmpeg encoding/transcoding parameters instead of the default copy mode, use `--video-parameters`.
+
+Example:
+```bash
+python3 server.py \
+  --peer-port 0 \
+  --bind-ip 0.0.0.0 \
+  --bind-port 40001 \
+  --video "<HLS_URL_OR_LOCAL_FILE>" \
+  --video-parameters "-c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k -mpegts_flags +resend_headers" \
+  --cipher chacha20
+```
+
+Behavior:
+- without `--video-parameters`: uses `-c copy -mpegts_flags +resend_headers`
+- with `--video-parameters`: uses exactly what you passed instead of the default copy settings
+
 ## About `--loss`
 - `--loss` simulates outbound packet loss on the server side for testing recovery behavior.
 - Value range: `0` to `100`
