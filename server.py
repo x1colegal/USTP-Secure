@@ -115,7 +115,6 @@ def maybe_regen_host_key(path: str, enabled: bool) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Server: FFmpeg -> USTP/UDP")
-    ap.add_argument("--peer-ip", default="0.0.0.0", help="Compatibility option; server accepts every valid AEAD client")
     ap.add_argument("--peer-port", type=int, default=0, help="Optional fixed client port; 0 = learn from HELLO source port")
     ap.add_argument("--bind-ip", default="0.0.0.0")
     ap.add_argument("--bind-port", type=int, default=40001)

@@ -90,7 +90,6 @@ Important:
 ## Server (AEAD enabled)
 ```bash
 python3 server.py \
-  --peer-ip 0.0.0.0 \
   --peer-port 0 \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
@@ -105,7 +104,6 @@ python3 server.py \
 
 ```bash
 python3 server.py \
-  --peer-ip 0.0.0.0 \
   --peer-port 0 \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
