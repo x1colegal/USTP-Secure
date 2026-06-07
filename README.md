@@ -36,6 +36,13 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - A normal server restart does not change the host key.
 - Use `--regen-key` on the server only when you intentionally want to rotate that host key.
 
+## Packet magic values
+- `UST1` means `UDP Speedy Transmission Protocol`, version 1.
+- `USS1` means `UDP Speedy Secure`, version 1.
+- In USTPS, `UST1` is the inner transport packet format.
+- In USTPS, `USS1` is the outer secure AEAD envelope format.
+- So, before decryption you normally see `USS1`, and after decryption the inner payload normally begins with `UST1`.
+
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
