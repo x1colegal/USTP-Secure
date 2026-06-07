@@ -182,6 +182,9 @@ tcp://127.0.0.1:1238
 - USTPS: same UDP transport plus AEAD encryption/authentication per packet.
 - Client exits with explicit error if no valid encrypted packets are received (server offline or handshake failed).
 
+## Internet-Drafts
+- `USTPS` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
+
 ## Related projects
 - `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTPS:
   `https://github.com/x1colegal/USSH`
