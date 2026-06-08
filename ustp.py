@@ -16,13 +16,12 @@ class SentItem:
 
 
 class USTPSender:
-    def __init__(self, sock: socket.socket, peer: Tuple[str, int], window: int = 512, rto: float = 0.25, loss_percent: int = 0, congestion_control: bool = False):
+    def __init__(self, sock: socket.socket, peer: Tuple[str, int], window: int = 512, rto: float = 0.25, loss_percent: int = 0):
         self.sock = sock
         self.peer = peer
         self.window = window
         self.rto = rto
         self.loss_percent = max(0, min(100, loss_percent))
-        self.congestion_control = congestion_control
 
         self.next_seq = 1
         self.next_stream_pos = 0
@@ -34,8 +33,6 @@ class USTPSender:
         self.lock = threading.Lock()
         self.running = False
         self.wakeup = threading.Event()
-        self.cwnd = 4.0
-        self.ssthresh = max(8.0, float(window) / 2.0)
         self.stats_acks = 0
         self.stats_rto = 0
         self.nack_ts: Dict[int, float] = {}
@@ -62,8 +59,6 @@ class USTPSender:
             self.sent.clear()
             self.retx_queue.clear()
             self.retx_set.clear()
-            self.cwnd = 4.0
-            self.ssthresh = max(8.0, float(self.window) / 2.0)
         print("[USTP-SENDER] session reset")
 
     def queue_payload(self, payload: bytes, stream_pos: Optional[int] = None) -> None:
@@ -89,10 +84,7 @@ class USTPSender:
         while burst < 64:
             with self.lock:
                 in_flight = len(self.sent)
-                eff_window = self.window
-                if self.congestion_control:
-                    eff_window = max(1, min(self.window, int(self.cwnd)))
-                if in_flight >= eff_window:
+                if in_flight >= self.window:
                     return
 
                 # retransmit priority (can send 5,6,4,7,8 physically)
@@ -143,11 +135,6 @@ class USTPSender:
                     now = time.time()
                     self.last_ack_ts = now
                     self.last_progress_ts = now
-                    if self.congestion_control:
-                        if self.cwnd < self.ssthresh:
-                            self.cwnd += 1.0
-                        else:
-                            self.cwnd += 1.0 / max(1.0, self.cwnd)
             if removed:
                 self.wakeup.set()
             return
@@ -178,10 +165,6 @@ class USTPSender:
                     self.retx_set.add(seq)
                     self.retx_queue.append(seq)
             if timed_out:
-                if self.congestion_control:
-                    with self.lock:
-                        self.ssthresh = max(2.0, self.cwnd / 2.0)
-                        self.cwnd = max(1.0, self.ssthresh)
                 with self.lock:
                     self.stats_rto += len(timed_out)
                 print(f"[USTP-SENDER] RTO queued {len(timed_out)}")
@@ -195,7 +178,6 @@ class USTPSender:
                 "rto": float(self.stats_rto),
                 "inflight": float(len(self.sent)),
                 "pending": float(len(self.pending)),
-                "cwnd": float(self.cwnd),
                 "last_ack_age": max(0.0, time.time() - self.last_ack_ts),
                 "last_send_age": max(0.0, time.time() - self.last_send_ts),
                 "last_progress_age": max(0.0, time.time() - self.last_progress_ts),

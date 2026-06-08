@@ -4,6 +4,8 @@ USTPS means **UDP Speedy Transmission Protocol Secure**.
 
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
+USTPS does not implement congestion control. If the network is congested, USTPS does not try to slow itself down like TCP. It is intentionally speed-first and UDP-like in that respect.
+
 Status: **Beta**
 
 USTPS is no longer just a proof of concept. It is currently in the Beta phase.
@@ -45,6 +47,7 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
+- USTPS does **not** implement congestion control.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, and retransmission.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
@@ -92,7 +95,7 @@ Important:
 - QUIC stream behavior:
   Inside one individual QUIC stream, ordering is still enforced. Missing data in that stream blocks later bytes for that same stream.
 - USTPS:
-  USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output.
+  USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. It also does not attempt congestion control; when the network is congested, USTPS does not intentionally back off like TCP.
 
 ## Server (AEAD enabled)
 ```bash

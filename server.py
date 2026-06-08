@@ -128,7 +128,6 @@ def main() -> None:
     ap.add_argument("--window", type=int, default=512)
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
-    ap.add_argument("--congestion-control", action="store_true", help="Enable optional AIMD congestion control")
     ap.add_argument("--cipher", default="auto", help="auto | chacha20 | aes-256-gcm | aes-128-gcm")
     ap.add_argument("--host-key-file", default=os.path.expanduser("~/.ustps_host_key"))
     ap.add_argument("--regen-key", action="store_true", help="Regenerate the persistent server host key after interactive confirmation")
@@ -147,8 +146,7 @@ def main() -> None:
     sessions_lock = threading.Lock()
 
     print(
-        f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} "
-        f"cc={'on' if args.congestion_control else 'off'} default-aead={selected_cipher or 'auto'} multi-client=on"
+        f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} default-aead={selected_cipher or 'auto'} multi-client=on"
     )
 
     running = True
@@ -166,7 +164,6 @@ def main() -> None:
             window=args.window,
             rto=args.rto,
             loss_percent=args.loss,
-            congestion_control=args.congestion_control,
         )
         sender.start()
         print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
