@@ -210,6 +210,7 @@ class USTPReceiver:
         self.last_data_ts = 0.0
         self.data_count = 0
         self.last_max_seq = 0
+        self.idle_clear_after = 8.0
         self.cleanup_every = 128
         self.seq_history_limit = 4096
         self.pos_history_limit = MAX_PAYLOAD * 4096
@@ -273,7 +274,7 @@ class USTPReceiver:
             return
         now = time.time()
         # Do not spam NACK when stream is idle/restarting.
-        if self.last_data_ts and (now - self.last_data_ts) > 1.0:
+        if self.last_data_ts and (now - self.last_data_ts) > self.idle_clear_after:
             self.received_seq.clear()
             self.nack_ts.clear()
             self.seq_to_pos.clear()
