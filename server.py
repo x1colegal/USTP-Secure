@@ -1,4 +1,5 @@
 import argparse
+import errno
 import os
 import shlex
 import socket
@@ -123,6 +124,34 @@ def tune_udp_socket(sock: socket.socket) -> None:
             pass
 
 
+def create_server_udp_socket(bind_ip: str, bind_port: int) -> socket.socket:
+    bind_host = bind_ip
+    if bind_host == "0.0.0.0":
+        bind_host = "::"
+    infos = socket.getaddrinfo(bind_host, bind_port, socket.AF_UNSPEC, socket.SOCK_DGRAM, 0, socket.AI_PASSIVE)
+    last_error = None
+    for family, socktype, proto, _, sockaddr in infos:
+        try:
+            sock = socket.socket(family, socktype, proto)
+            if family == socket.AF_INET6:
+                try:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except OSError:
+                    pass
+            tune_udp_socket(sock)
+            sock.bind(sockaddr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            try:
+                sock.close()
+            except Exception:
+                pass
+    if last_error is not None:
+        raise last_error
+    raise OSError(errno.EADDRNOTAVAIL, "unable to bind UDP socket")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Server: FFmpeg -> USTP/UDP")
     ap.add_argument("--peer-port", type=int, default=0, help="Optional fixed client port; 0 = learn from HELLO source port")
@@ -144,14 +173,12 @@ def main() -> None:
     ap.add_argument("--max-pending-packets", type=int, default=4096, help="Per-session pending queue hard limit before the session is considered stalled")
     args = ap.parse_args()
 
-    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tune_udp_socket(raw_sock)
+    raw_sock = create_server_udp_socket(args.bind_ip, args.bind_port)
     selected_cipher = None if args.cipher == "auto" else normalize_cipher_name(args.cipher)
     maybe_regen_host_key(args.host_key_file, args.regen_key)
     host_private = load_or_create_host_key(args.host_key_file)
     host_public = public_bytes(host_private.public_key())
     sock = AEADDatagramSocket(raw_sock, cipher_name=selected_cipher)
-    sock.bind((args.bind_ip, args.bind_port))
     sessions: dict[tuple[str, int], ClientSession] = {}
     sessions_lock = threading.Lock()
 

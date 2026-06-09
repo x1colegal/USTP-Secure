@@ -1,4 +1,5 @@
 import argparse
+import errno
 import json
 import os
 import socket
@@ -87,6 +88,41 @@ def tune_udp_socket(sock: socket.socket) -> None:
             pass
 
 
+def resolve_peer_candidates(host: str, port: int):
+    infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+    candidates = []
+    seen = set()
+    for family in (socket.AF_INET6, socket.AF_INET):
+        for fam, _, _, _, sockaddr in infos:
+            if fam != family:
+                continue
+            key = (fam, sockaddr)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((fam, sockaddr))
+    return candidates
+
+
+def bind_udp_socket(bind_ip: str, bind_port: int, family: int) -> socket.socket:
+    bind_host = bind_ip
+    if family == socket.AF_INET6 and bind_host == "0.0.0.0":
+        bind_host = "::"
+    if family == socket.AF_INET and bind_host == "::":
+        bind_host = "0.0.0.0"
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    tune_udp_socket(sock)
+    if family == socket.AF_INET6:
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        except OSError:
+            pass
+        sock.bind((bind_host, bind_port, 0, 0))
+    else:
+        sock.bind((bind_host, bind_port))
+    return sock
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Client: USTP/UDP -> TCP or UDP output")
     ap.add_argument("--peer-ip", required=True)
@@ -106,25 +142,85 @@ def main() -> None:
     ap.add_argument("--regen-key", action="store_true", help="Allow replacing a stored TOFU server key after interactive confirmation")
     args = ap.parse_args()
 
-    resolved_peer_ip = socket.gethostbyname(args.peer_ip)
     tofu_label = f"{args.peer_ip}:{args.peer_port}"
-
-    raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tune_udp_socket(raw_usock)
     selected_cipher = normalize_cipher_name(args.cipher)
-    usock = AEADDatagramSocket(raw_usock, cipher_name=selected_cipher)
-    usock.bind((args.bind_ip, args.bind_port))
-    peer = (resolved_peer_ip, args.peer_port)
-    recv = USTPReceiver(sock=usock, peer=peer)
+    candidates = resolve_peer_candidates(args.peer_ip, args.peer_port)
+    if not candidates:
+        raise SystemExit(f"Could not resolve {args.peer_ip}")
+    raw_usock = None
+    usock = None
+    peer = None
+    recv = None
     key_lock = threading.Lock()
     client_private = x25519.X25519PrivateKey.generate()
     client_pub = public_bytes(client_private.public_key())
     session_ready = False
     last_kex_ts = 0.0
+    active_family = None
 
-    local_ip, local_port = usock.getsockname()
+    for idx, (family, sockaddr) in enumerate(candidates):
+        try:
+            raw_candidate = bind_udp_socket(args.bind_ip, args.bind_port, family)
+            raw_candidate.settimeout(0.2)
+            usock_candidate = AEADDatagramSocket(raw_candidate, cipher_name=selected_cipher)
+            peer_candidate = sockaddr
+            recv_candidate = USTPReceiver(sock=usock_candidate, peer=peer_candidate)
+            deadline = time.time() + 3.0
+            while time.time() < deadline and not session_ready:
+                try:
+                    hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
+                    usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
+                except OSError as exc:
+                    if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+                        break
+                    raise
+                try:
+                    raw, addr = usock_candidate.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                if addr != peer_candidate:
+                    continue
+                pkt = parse_packet(raw)
+                if not pkt:
+                    continue
+                if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
+                    rest = pkt.payload[len(SESSION_PREFIX) :]
+                    if len(rest) < 64:
+                        continue
+                    echoed_client_pub = rest[:32]
+                    server_pub = rest[32:64]
+                    if echoed_client_pub != client_pub:
+                        continue
+                    session_cipher = rest[64:].decode("ascii", "replace") or selected_cipher
+                    if session_cipher != selected_cipher:
+                        raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                    check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
+                    server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
+                    session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
+                    usock_candidate.set_peer_psk(peer_candidate, session_key, session_cipher)
+                    raw_usock = raw_candidate
+                    usock = usock_candidate
+                    peer = peer_candidate
+                    recv = recv_candidate
+                    active_family = family
+                    session_ready = True
+                    break
+            if session_ready:
+                break
+            raw_candidate.close()
+        except OSError as exc:
+            if exc.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+                raise
+        if idx + 1 < len(candidates):
+            print(f"[USTP-CLIENT] fallback to next address after trying {sockaddr[0]}")
+    if not session_ready or raw_usock is None or usock is None or peer is None or recv is None:
+        raise SystemExit("No USTPS session established (AAAA and A attempts failed)")
+
+    local = usock.getsockname()
+    local_ip = local[0]
+    local_port = local[1]
     print(f"[USTP-CLIENT] local bind {local_ip}:{local_port}")
-    print(f"[USTP-CLIENT] peer {args.peer_ip} resolved={resolved_peer_ip}:{peer[1]}")
+    print(f"[USTP-CLIENT] peer {args.peer_ip} resolved={peer[0]}:{peer[1]} family={'IPv6' if active_family == socket.AF_INET6 else 'IPv4'}")
     print(f"[USTP-CLIENT] aead cipher={selected_cipher}")
 
     out_by_pos = {}
@@ -207,7 +303,7 @@ def main() -> None:
                 raw, addr = usock.recvfrom(65535)
             except Exception:
                 continue
-            if addr[0] != resolved_peer_ip:
+            if addr != peer:
                 continue
             pkt = parse_packet(raw)
             if not pkt:
@@ -292,8 +388,6 @@ def main() -> None:
     try:
         while True:
             now = time.time()
-            if not session_ready and now - last_rx_ts > 12.0:
-                raise SystemExit("No USTPS session established (server offline or handshake failed)")
             if session_ready and last_valid_data_ts and now - last_valid_data_ts > 6.0 and now - last_stall_log_ts > 6.0:
                 if running:
                     print("[USTP-CLIENT] no data for 6s; keeping the same session key and waiting")
