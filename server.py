@@ -323,17 +323,12 @@ def main() -> None:
                 try:
                     stats = session.sender.get_stats()
                     if stats["pending"] > args.max_pending_packets and stats["last_progress_age"] > args.stalled_progress_timeout:
-                        with sessions_lock:
-                            current = sessions.get(addr)
-                            if current is session:
-                                session.sender.stop()
-                                sock.clear_peer(addr)
-                                del sessions[addr]
-                                print(
-                                    f"[USTP-SERVER] stalled session removed {addr[0]}:{addr[1]} "
-                                    f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
-                                    f"last_progress={stats['last_progress_age']:.1f}s"
-                                )
+                        session.sender.reset_session()
+                        print(
+                            f"[USTP-SERVER] stalled session reset {addr[0]}:{addr[1]} "
+                            f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
+                            f"last_progress={stats['last_progress_age']:.1f}s"
+                        )
                         continue
                     if (now - session.last_seen_ts) > 180.0:
                         with sessions_lock:
