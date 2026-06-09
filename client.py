@@ -17,6 +17,7 @@ from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 HELLO_PREFIX = b"USTPS-KEX1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
+UDP_BUFFER_BYTES = 4 * 1024 * 1024
 
 
 def public_bytes(pubkey) -> bytes:
@@ -78,6 +79,14 @@ def check_tofu(path: str, peer_label: str, server_pub: bytes, allow_regen: bool 
         raise SystemExit(f"TOFU mismatch for {peer_label}: possible MITM or server key change")
 
 
+def tune_udp_socket(sock: socket.socket) -> None:
+    for opt in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, opt, UDP_BUFFER_BYTES)
+        except OSError:
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Client: USTP/UDP -> TCP or UDP output")
     ap.add_argument("--peer-ip", required=True)
@@ -101,6 +110,7 @@ def main() -> None:
     tofu_label = f"{args.peer_ip}:{args.peer_port}"
 
     raw_usock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tune_udp_socket(raw_usock)
     selected_cipher = normalize_cipher_name(args.cipher)
     usock = AEADDatagramSocket(raw_usock, cipher_name=selected_cipher)
     usock.bind((args.bind_ip, args.bind_port))
@@ -126,6 +136,7 @@ def main() -> None:
     clients = []
     cl_lock = threading.Lock()
     usock_out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tune_udp_socket(usock_out)
 
     if args.output_mode == "tcp":
         tsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
