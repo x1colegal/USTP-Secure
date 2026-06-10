@@ -1,5 +1,6 @@
 import argparse
 import errno
+import ipaddress
 import json
 import os
 import socket
@@ -89,7 +90,15 @@ def tune_udp_socket(sock: socket.socket) -> None:
 
 
 def resolve_peer_candidates(host: str, port: int):
-    infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+    normalized = host.strip().strip("[]")
+    try:
+        ip = ipaddress.ip_address(normalized)
+        family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        sockaddr = (str(ip), port, 0, 0) if family == socket.AF_INET6 else (str(ip), port)
+        return [(family, sockaddr)]
+    except ValueError:
+        pass
+    infos = socket.getaddrinfo(normalized, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
     candidates = []
     seen = set()
     for family in (socket.AF_INET6, socket.AF_INET):
