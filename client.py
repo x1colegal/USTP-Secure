@@ -135,6 +135,16 @@ def bind_udp_socket(bind_ip: str, bind_port: int, family: int) -> socket.socket:
     return sock
 
 
+def is_temporary_network_error(exc: OSError) -> bool:
+    return exc.errno in (
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.EADDRNOTAVAIL,
+        errno.ENODEV,
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Client: USTP/UDP -> TCP or UDP output")
     ap.add_argument("--peer-ip", required=True)
@@ -251,7 +261,12 @@ def main() -> None:
                             + b"\0"
                             + client_pub
                         )
-                        usock_candidate.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), peer_candidate)
+                        try:
+                            usock_candidate.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), peer_candidate)
+                        except OSError as exc:
+                            if is_temporary_network_error(exc):
+                                continue
+                            raise
                         local_challenge_token = token
                         local_session_id = new_session_id
                         continue
@@ -403,6 +418,9 @@ def main() -> None:
             try:
                 local_usock.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), local_peer)
                 last_kex_ts = time.time()
+            except OSError as exc:
+                if not is_temporary_network_error(exc):
+                    pass
             except Exception:
                 pass
             time.sleep(args.keepalive_interval)
@@ -458,7 +476,12 @@ def main() -> None:
                     + b"\0"
                     + client_pub
                 )
-                local_usock.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), local_peer)
+                try:
+                    local_usock.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), local_peer)
+                except OSError as exc:
+                    if is_temporary_network_error(exc):
+                        continue
+                    raise
                 challenge_token = token
                 session_id = new_session_id
                 continue
