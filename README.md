@@ -27,6 +27,8 @@ This repository, however, is focused specifically on **streaming over USTPS**.
   - `aes-128-gcm`
 - AEAD is mandatory for payload `DATA` in USTPS.
 - Transport control packets (`HELLO`, `ACK`, `RETRANSMIT_REQUEST`, `CLOSE`) stay plaintext on purpose.
+- Control packets are serialized as ASCII transport records.
+- `DATA` packets use a binary frame format named `UPACK` (`UPAK` on the wire).
 - No static PSK is used.
 - Each client performs an X25519 key exchange when it joins.
 - Each client gets a separate AEAD session key.
@@ -43,9 +45,11 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 ## Packet magic values
 - `UST1` means `UDP Speedy Transmission Protocol`, version 1.
 - `USS1` means `UDP Speedy Secure`, version 1.
-- In USTPS, `UST1` is the inner transport packet format.
+- `UPAK` is the binary `UPACK` DATA frame marker.
+- In USTPS, `UST1` identifies plaintext ASCII control packets.
+- In USTPS, `UPAK` identifies binary DATA packets after decryption.
 - In USTPS, `USS1` is the outer secure AEAD envelope format.
-- So, before decryption you normally see `USS1`, and after decryption the inner payload normally begins with `UST1`.
+- So, before decryption you normally see `USS1`, and after decryption you normally see either `UST1|...` for control or `UPAK...` for DATA.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
@@ -78,6 +82,12 @@ Example:
 - If the current path stalls, the client recreates its UDP socket, resolves the server address again, and tries to resume the existing session by `session_id`.
 - If session resume is not possible, the client falls back to a fresh handshake automatically.
 - This is designed so a mobile client can switch networks without immediately being forced to restart the client process.
+
+## Wire format
+- `HELLO`, `ACK`, `RETRANSMIT_REQUEST`, and `CLOSE` are ASCII control records.
+- Their payload bytes are carried as Base64 inside the ASCII control line, so control stays text-friendly even when the logical payload contains binary material such as public keys or tokens.
+- `DATA` uses the binary `UPACK` frame format instead of ASCII to avoid bloating media payload packets.
+- This means captures typically look like plaintext `UST1|...` control plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
 
 ## Retransmission model
 - USTPS uses selective retransmission, not Go-Back-N.
