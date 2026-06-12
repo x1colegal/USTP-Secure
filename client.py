@@ -185,17 +185,42 @@ def main() -> None:
     last_stall_log_ts = 0.0
     recovery_in_progress = False
     last_recovery_attempt_ts = 0.0
+    last_recovery_was_temp_network = False
     running = True
+    connection_epoch = 0
+    stream_resync_needed = False
+    out_by_pos = {}
+    next_out_pos = 0
+    ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
+    reorder_lock = threading.Lock()
+    last_gap_log = 0.0
+
+    def reset_local_stream_state(reason: str) -> None:
+        nonlocal out_by_pos, next_out_pos, ordered_release_at, last_gap_log, stream_resync_needed
+        with reorder_lock:
+            out_by_pos.clear()
+            next_out_pos = 0
+            ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
+            last_gap_log = 0.0
+            stream_resync_needed = True
+        with state_lock:
+            local_recv = recv
+        if local_recv is not None:
+            local_recv.reset_state()
+        if running:
+            print(f"[USTP-CLIENT] stream state reset reason={reason}")
 
     def connect_transport(prefer_resume: bool) -> bool:
         nonlocal raw_usock, usock, peer, recv, active_family
         nonlocal session_ready, session_id, challenge_token, last_valid_data_ts, last_rx_ts
+        nonlocal connection_epoch, last_recovery_was_temp_network
         candidates = resolve_peer_candidates(args.peer_ip, args.peer_port)
         if not candidates:
             return False
 
         local_session_id = session_id
         local_challenge_token = challenge_token
+        temp_network_blocked = False
 
         for idx, (family, sockaddr) in enumerate(candidates):
             raw_candidate = None
@@ -226,7 +251,8 @@ def main() -> None:
                             hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
                         usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
                     except OSError as exc:
-                        if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+                        if is_temporary_network_error(exc):
+                            temp_network_blocked = True
                             break
                         raise
 
@@ -287,6 +313,7 @@ def main() -> None:
                         recv_candidate.peer = peer_candidate
                         with state_lock:
                             old_raw = raw_usock
+                            old_session_id = session_id
                             raw_usock = raw_candidate
                             usock = usock_candidate
                             peer = peer_candidate
@@ -297,6 +324,9 @@ def main() -> None:
                             challenge_token = None
                             last_rx_ts = time.time()
                             last_valid_data_ts = time.time()
+                            connection_epoch += 1
+                        if prefer_resume or old_session_id != new_session_id:
+                            reset_local_stream_state("path-recovery")
                         if old_raw is not None and old_raw is not raw_candidate:
                             try:
                                 old_raw.close()
@@ -308,7 +338,9 @@ def main() -> None:
                 if ready:
                     return True
             except OSError as exc:
-                if exc.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+                if is_temporary_network_error(exc):
+                    temp_network_blocked = True
+                else:
                     raise
             finally:
                 if raw_candidate is not None:
@@ -319,8 +351,11 @@ def main() -> None:
                             raw_candidate.close()
                         except Exception:
                             pass
+            if temp_network_blocked:
+                break
             if idx + 1 < len(candidates):
                 print(f"[USTP-CLIENT] fallback to next address after trying {sockaddr[0]}")
+        last_recovery_was_temp_network = temp_network_blocked
         return False
 
     if not connect_transport(prefer_resume=False):
@@ -333,12 +368,6 @@ def main() -> None:
     print(f"[USTP-CLIENT] local bind {local[0]}:{local[1]}")
     print(f"[USTP-CLIENT] peer {args.peer_ip} resolved={local_peer[0]}:{local_peer[1]} family={'IPv6' if local_family == socket.AF_INET6 else 'IPv4'}")
     print(f"[USTP-CLIENT] aead cipher={selected_cipher}")
-
-    out_by_pos = {}
-    next_out_pos = 0
-    ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
-    reorder_lock = threading.Lock()
-    last_gap_log = 0.0
 
     clients = []
     cl_lock = threading.Lock()
@@ -435,17 +464,35 @@ def main() -> None:
             time.sleep(0.03)
 
     def recv_loop() -> None:
-        nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts
+        nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, ordered_release_at, stream_resync_needed
         nonlocal session_ready, session_id, challenge_token
+        local_epoch = -1
         while running:
             with state_lock:
                 local_usock = usock
                 local_peer = peer
+                current_epoch = connection_epoch
+            if current_epoch != local_epoch:
+                local_epoch = current_epoch
+                time.sleep(0.05)
+                continue
             if local_usock is None or local_peer is None:
                 time.sleep(0.05)
                 continue
             try:
                 raw, addr = local_usock.recvfrom(65535)
+            except OSError as exc:
+                if exc.errno in (
+                    errno.EBADF,
+                    errno.ENOTCONN,
+                    errno.ECONNRESET,
+                    errno.ENETDOWN,
+                    errno.ENETUNREACH,
+                    errno.EHOSTUNREACH,
+                ):
+                    time.sleep(0.05)
+                    continue
+                continue
             except Exception:
                 continue
             if addr != local_peer:
@@ -521,6 +568,12 @@ def main() -> None:
                 output_send(pkt.payload)
 
             with reorder_lock:
+                if stream_resync_needed and not out_by_pos and next_out_pos == 0:
+                    next_out_pos = pkt.stream_pos
+                    ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
+                    stream_resync_needed = False
+                    if running:
+                        print(f"[USTP-CLIENT] RESYNC stream_pos={next_out_pos} after path recovery")
                 out_by_pos[pkt.stream_pos] = pkt.payload
                 while next_out_pos in out_by_pos:
                     if args.output_mode == "tcp" and time.time() < ordered_release_at:
@@ -550,7 +603,7 @@ def main() -> None:
                         )
 
     def recovery_loop() -> None:
-        nonlocal recovery_in_progress, last_recovery_attempt_ts, session_ready, challenge_token
+        nonlocal recovery_in_progress, last_recovery_attempt_ts, session_ready, challenge_token, last_recovery_was_temp_network
         while running:
             now = time.time()
             need_recover = False
@@ -568,8 +621,11 @@ def main() -> None:
                     with state_lock:
                         session_ready = False
                     if not connect_transport(prefer_resume=True):
-                        challenge_token = None
-                        connect_transport(prefer_resume=False)
+                        if not last_recovery_was_temp_network:
+                            challenge_token = None
+                            connect_transport(prefer_resume=False)
+                        elif running:
+                            print("[USTP-CLIENT] temporary network loss detected; waiting for the same path to come back")
                 finally:
                     recovery_in_progress = False
             time.sleep(0.5)

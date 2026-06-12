@@ -99,6 +99,16 @@ Example:
 - `RTO` is not fixed-only: it is adapted from measured `RTT` samples of non-retransmitted packets.
 - Only the missing packets are retransmitted.
 
+## Log meanings
+- `ACK`: the receiver acknowledged one or more `seq` values, so the sender can retire them from the retransmission buffer.
+- `NACK`: the receiver detected a missing `seq` and explicitly requested retransmission of that missing packet only.
+- `GAP`: the client received a packet whose `stream_pos` is ahead of the next ordered output position, so there is currently a hole in the logical byte stream.
+- `RECOVERY`: a late packet arrived with `stream_pos` below the current frontier, meaning an earlier gap is being repaired or was repaired after newer data had already been seen.
+- `RESYNC`: after a path recovery, the client anchored ordered output to the first new `stream_pos` seen on the recovered path instead of staying stuck forever on an old pre-failure gap.
+- `RTO`: retransmission timeout. The sender did not see ACK progress in time, so it queued a packet for retry even without an explicit NACK.
+- `transport stalled; trying path recovery`: the client stopped receiving packets on the current UDP path and is trying to rebuild the path or resume the session.
+- `stream state reset reason=path-recovery`: after a path recovery, the client cleared its local reorder/gap state so it does not get stuck forever waiting on an old hole from the dead path.
+
 ## Why it does not have HoL blocking
 - TCP has transport-level Head-of-Line blocking: if one segment is missing, later data in the same byte stream cannot be delivered to the application yet.
 - USTPS does not do that at the transport layer.

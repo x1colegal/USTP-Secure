@@ -266,6 +266,20 @@ class USTPReceiver:
         self.seq_history_limit = 4096
         self.pos_history_limit = MAX_PAYLOAD * 4096
 
+    def reset_state(self) -> None:
+        self.buffer_by_pos.clear()
+        self.seq_to_pos.clear()
+        self.next_pos = 0
+        self.contiguous_max_pos = -1
+        self.received_seq.clear()
+        self.pending_ack.clear()
+        self.pending_ack_set.clear()
+        self.last_ack_flush_ts = time.time()
+        self.nack_ts.clear()
+        self.last_data_ts = 0.0
+        self.data_count = 0
+        self.last_max_seq = 0
+
     def _trim_state(self) -> None:
         if len(self.received_seq) > self.seq_history_limit:
             min_seq = max(0, self.last_max_seq - self.seq_history_limit)
