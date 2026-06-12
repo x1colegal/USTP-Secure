@@ -43,13 +43,13 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Use `--regen-key` on the server only when you intentionally want to rotate that host key.
 
 ## Packet magic values
-- `UST1` means `UDP Speedy Transmission Protocol`, version 1.
+- `ACK:`, `NACK:`, `HELLO:`, and `CLOSE:` are the plaintext control record prefixes.
 - `USS1` means `UDP Speedy Secure`, version 1.
 - `UPAK` is the binary `UPACK` DATA frame marker.
-- In USTPS, `UST1` identifies plaintext ASCII control packets.
+- In USTPS, plaintext control is human-readable ASCII such as `ACK: 10`, `NACK: 42`, `HELLO: ...`, and `CLOSE:`.
 - In USTPS, `UPAK` identifies binary DATA packets after decryption.
 - In USTPS, `USS1` is the outer secure AEAD envelope format.
-- So, before decryption you normally see `USS1`, and after decryption you normally see either `UST1|...` for control or `UPAK...` for DATA.
+- So, before decryption you normally see `USS1`, and after decryption you normally see either readable control lines or `UPAK...` for DATA.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
@@ -84,10 +84,12 @@ Example:
 - This is designed so a mobile client can switch networks without immediately being forced to restart the client process.
 
 ## Wire format
-- `HELLO`, `ACK`, `RETRANSMIT_REQUEST`, and `CLOSE` are ASCII control records.
-- Their payload bytes are carried as Base64 inside the ASCII control line, so control stays text-friendly even when the logical payload contains binary material such as public keys or tokens.
+- `ACK` is serialized like `ACK: 10` or batched like `ACK: 10 11 12`.
+- `RETRANSMIT_REQUEST` is serialized like `NACK: 42`.
+- `HELLO` is serialized like `HELLO: <base64-payload>`.
+- `CLOSE` is serialized like `CLOSE:`.
 - `DATA` uses the binary `UPACK` frame format instead of ASCII to avoid bloating media payload packets.
-- This means captures typically look like plaintext `UST1|...` control plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
+- This means captures typically look like readable control lines plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
 
 ## Retransmission model
 - USTPS uses selective retransmission, not Go-Back-N.
@@ -212,7 +214,7 @@ tcp://127.0.0.1:1238
 
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
-- USTPS: same UDP transport plus AEAD protection for `DATA`, plaintext transport control, challenge validation before data flow, and per-client session tracking by Base64 `session_id`.
+- USTPS: same UDP transport plus AEAD protection for `DATA`, human-readable plaintext transport control, challenge validation before data flow, and per-client session tracking by Base64 `session_id`.
 - Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
 
 ## Internet-Drafts
