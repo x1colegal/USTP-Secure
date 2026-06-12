@@ -73,6 +73,12 @@ Example:
 - After validation, the session is tracked by the generated Base64 `session_id`, not just by the original `IP:port`.
 - Future keepalives use that `session_id`, so the server can remap the session if the client source port changes.
 
+## Network change support
+- The USTPS client can recover when the device changes networks and the UDP path breaks.
+- If the current path stalls, the client recreates its UDP socket, resolves the server address again, and tries to resume the existing session by `session_id`.
+- If session resume is not possible, the client falls back to a fresh handshake automatically.
+- This is designed so a mobile client can switch networks without immediately being forced to restart the client process.
+
 ## Retransmission model
 - USTPS uses selective retransmission, not Go-Back-N.
 - Every unique `DATA` packet is ACKed individually.
