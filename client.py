@@ -18,6 +18,9 @@ from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
 HELLO_PREFIX = b"USTPS-KEX1\0"
+CHALLENGE_PREFIX = b"USTPS-CHALLENGE1\0"
+RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1\0"
+RESUME_PREFIX = b"USTPS-RESUME1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 
@@ -166,6 +169,8 @@ def main() -> None:
     session_ready = False
     last_kex_ts = 0.0
     active_family = None
+    session_id = None
+    challenge_token = None
 
     for idx, (family, sockaddr) in enumerate(candidates):
         try:
@@ -177,7 +182,10 @@ def main() -> None:
             deadline = time.time() + 3.0
             while time.time() < deadline and not session_ready:
                 try:
-                    hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
+                    if challenge_token and session_id:
+                        hello_payload = RESPONSE_PREFIX + challenge_token.encode("ascii") + b"\0" + session_id.encode("ascii") + b"\0" + selected_cipher.encode("ascii") + b"\0" + client_pub
+                    else:
+                        hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
                     usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
                 except OSError as exc:
                     if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH):
@@ -192,15 +200,31 @@ def main() -> None:
                 pkt = parse_packet(raw)
                 if not pkt:
                     continue
+                if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
+                    rest = pkt.payload[len(CHALLENGE_PREFIX) :]
+                    parts = rest.split(b"\0", 3)
+                    if len(parts) != 4 or len(parts[3]) != 32:
+                        continue
+                    token = parts[0].decode("ascii", "replace")
+                    new_session_id = parts[1].decode("ascii", "replace")
+                    session_cipher = parts[2].decode("ascii", "replace") or selected_cipher
+                    server_pub = parts[3]
+                    if session_cipher != selected_cipher:
+                        raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                    check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
+                    reply = RESPONSE_PREFIX + token.encode("ascii") + b"\0" + new_session_id.encode("ascii") + b"\0" + selected_cipher.encode("ascii") + b"\0" + client_pub
+                    usock_candidate.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), peer_candidate)
+                    challenge_token = token
+                    session_id = new_session_id
+                    continue
                 if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                     rest = pkt.payload[len(SESSION_PREFIX) :]
-                    if len(rest) < 64:
+                    parts = rest.split(b"\0", 2)
+                    if len(parts) != 3 or len(parts[2]) != 32:
                         continue
-                    echoed_client_pub = rest[:32]
-                    server_pub = rest[32:64]
-                    if echoed_client_pub != client_pub:
-                        continue
-                    session_cipher = rest[64:].decode("ascii", "replace") or selected_cipher
+                    new_session_id = parts[0].decode("ascii", "replace")
+                    session_cipher = parts[1].decode("ascii", "replace") or selected_cipher
+                    server_pub = parts[2]
                     if session_cipher != selected_cipher:
                         raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
                     check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
@@ -213,6 +237,7 @@ def main() -> None:
                     recv = recv_candidate
                     active_family = family
                     session_ready = True
+                    session_id = new_session_id
                     break
             if session_ready:
                 break
@@ -293,7 +318,12 @@ def main() -> None:
         nonlocal last_kex_ts
         while running:
             with key_lock:
-                hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
+                if session_ready and session_id:
+                    hello_payload = RESUME_PREFIX + session_id.encode("ascii")
+                elif challenge_token and session_id:
+                    hello_payload = RESPONSE_PREFIX + challenge_token.encode("ascii") + b"\0" + session_id.encode("ascii") + b"\0" + selected_cipher.encode("ascii") + b"\0" + client_pub
+                else:
+                    hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
             hello = mkp(TYPE_HELLO, payload=hello_payload)
             usock.send_plain(hello.to_bytes(), peer)
             last_kex_ts = time.time()
@@ -306,7 +336,7 @@ def main() -> None:
             time.sleep(0.03)
 
     def recv_loop() -> None:
-        nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, session_ready
+        nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, session_ready, session_id, challenge_token
         while running:
             try:
                 raw, addr = usock.recvfrom(65535)
@@ -318,17 +348,31 @@ def main() -> None:
             if not pkt:
                 continue
             last_rx_ts = time.time()
+            if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
+                rest = pkt.payload[len(CHALLENGE_PREFIX) :]
+                parts = rest.split(b"\0", 3)
+                if len(parts) != 4 or len(parts[3]) != 32:
+                    continue
+                token = parts[0].decode("ascii", "replace")
+                new_session_id = parts[1].decode("ascii", "replace")
+                session_cipher = parts[2].decode("ascii", "replace") or selected_cipher
+                server_pub = parts[3]
+                if session_cipher != selected_cipher:
+                    raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
+                reply = RESPONSE_PREFIX + token.encode("ascii") + b"\0" + new_session_id.encode("ascii") + b"\0" + selected_cipher.encode("ascii") + b"\0" + client_pub
+                usock.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), peer)
+                challenge_token = token
+                session_id = new_session_id
+                continue
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                 rest = pkt.payload[len(SESSION_PREFIX) :]
-                if len(rest) >= 64:
-                    echoed_client_pub = rest[:32]
-                    server_pub = rest[32:64]
-                    session_cipher = rest[64:].decode("ascii", "replace") or selected_cipher
+                parts = rest.split(b"\0", 2)
+                if len(parts) == 3 and len(parts[2]) == 32:
+                    new_session_id = parts[0].decode("ascii", "replace")
+                    session_cipher = parts[1].decode("ascii", "replace") or selected_cipher
+                    server_pub = parts[2]
                     with key_lock:
-                        if echoed_client_pub != client_pub:
-                            if running:
-                                print("[USTP-CLIENT] ignored stale session response")
-                            continue
                         if session_cipher != selected_cipher:
                             raise SystemExit(
                                 f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}"
@@ -338,9 +382,10 @@ def main() -> None:
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
                     usock.set_peer_psk(peer, session_key, session_cipher)
                     session_ready = True
+                    session_id = new_session_id
                     last_valid_data_ts = time.time()
                     if running:
-                        print(f"[USTP-CLIENT] session aead cipher={session_cipher}")
+                        print(f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:
                 continue

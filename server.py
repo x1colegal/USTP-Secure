@@ -8,6 +8,8 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
+import base64
+import secrets
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
@@ -18,6 +20,9 @@ from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, m
 from ustp import USTPSender, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
 HELLO_PREFIX = b"USTPS-KEX1\0"
+CHALLENGE_PREFIX = b"USTPS-CHALLENGE1\0"
+RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1\0"
+RESUME_PREFIX = b"USTPS-RESUME1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
 VIDEO_USER_AGENT = "USTPS Video Mode"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
@@ -33,9 +38,20 @@ class ClientSession:
     session_psk: bytes
     client_pub: bytes
     server_pub: bytes
+    session_id: str
     session_reply: bytes
     next_stream_pos: int = 0
     created_ts: float = 0.0
+
+
+@dataclass
+class PendingChallenge:
+    addr: tuple[str, int]
+    client_pub: bytes
+    cipher: str
+    session_id: str
+    token: str
+    created_ts: float
 
 
 def public_bytes(pubkey) -> bytes:
@@ -51,20 +67,42 @@ def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> b
     ).derive(shared)
 
 
-def parse_client_hello(payload: bytes) -> tuple[bytes, str | None] | None:
-    if not payload.startswith(HELLO_PREFIX):
-        return None
-    rest = payload[len(HELLO_PREFIX) :]
-    if len(rest) < 32:
-        return None
-    client_pub = rest[:32]
-    cipher = None
-    if len(rest) > 32:
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def parse_client_hello(payload: bytes):
+    if payload.startswith(HELLO_PREFIX):
+        rest = payload[len(HELLO_PREFIX) :]
+        if len(rest) < 32:
+            return None
+        client_pub = rest[:32]
+        cipher = None
+        if len(rest) > 32:
+            try:
+                cipher = normalize_cipher_name(rest[32:].decode("ascii", "replace"))
+            except Exception:
+                cipher = None
+        return ("init", client_pub, cipher)
+    if payload.startswith(RESPONSE_PREFIX):
+        rest = payload[len(RESPONSE_PREFIX) :]
+        parts = rest.split(b"\0", 3)
+        if len(parts) != 4 or len(parts[3]) != 32:
+            return None
         try:
-            cipher = normalize_cipher_name(rest[32:].decode("ascii", "replace"))
+            token = parts[0].decode("ascii", "replace")
+            session_id = parts[1].decode("ascii", "replace")
+            cipher = normalize_cipher_name(parts[2].decode("ascii", "replace"))
         except Exception:
-            cipher = None
-    return client_pub, cipher
+            return None
+        return ("challenge_reply", token, session_id, parts[3], cipher)
+    if payload.startswith(RESUME_PREFIX):
+        rest = payload[len(RESUME_PREFIX) :]
+        try:
+            return ("resume", rest.decode("ascii", "replace"))
+        except Exception:
+            return None
+    return None
 
 
 def load_or_create_host_key(path: str) -> x25519.X25519PrivateKey:
@@ -180,6 +218,8 @@ def main() -> None:
     host_public = public_bytes(host_private.public_key())
     sock = AEADDatagramSocket(raw_sock, cipher_name=selected_cipher)
     sessions: dict[tuple[str, int], ClientSession] = {}
+    sessions_by_id: dict[str, ClientSession] = {}
+    pending_challenges: dict[tuple[str, int], PendingChallenge] = {}
     sessions_lock = threading.Lock()
 
     print(
@@ -188,13 +228,28 @@ def main() -> None:
 
     running = True
 
-    def new_session(addr: tuple[str, int], client_pub_raw: bytes, requested_cipher: str | None) -> ClientSession:
+    def send_challenge(addr: tuple[str, int], client_pub_raw: bytes, requested_cipher: str | None) -> None:
         cipher = selected_cipher or requested_cipher or "chacha20"
-        client_pub = x25519.X25519PublicKey.from_public_bytes(client_pub_raw)
-        session_psk = derive_session_key(host_private.exchange(client_pub), client_pub_raw, host_public)
-        session_reply = SESSION_PREFIX + client_pub_raw + host_public + cipher.encode("ascii")
+        challenge = pending_challenges.get(addr)
+        if challenge is None or challenge.client_pub != client_pub_raw or challenge.cipher != cipher:
+            challenge = PendingChallenge(
+                addr=addr,
+                client_pub=client_pub_raw,
+                cipher=cipher,
+                session_id=b64u(secrets.token_bytes(18)),
+                token=b64u(secrets.token_bytes(18)),
+                created_ts=time.time(),
+            )
+            pending_challenges[addr] = challenge
+        payload = CHALLENGE_PREFIX + challenge.token.encode("ascii") + b"\0" + challenge.session_id.encode("ascii") + b"\0" + challenge.cipher.encode("ascii") + b"\0" + host_public
+        sock.send_plain(mkp(TYPE_HELLO, payload=payload).to_bytes(), addr)
+
+    def new_session(addr: tuple[str, int], challenge: PendingChallenge) -> ClientSession:
+        client_pub = x25519.X25519PublicKey.from_public_bytes(challenge.client_pub)
+        session_psk = derive_session_key(host_private.exchange(client_pub), challenge.client_pub, host_public)
+        session_reply = SESSION_PREFIX + challenge.session_id.encode("ascii") + b"\0" + challenge.cipher.encode("ascii") + b"\0" + host_public
         sock.send_plain(mkp(TYPE_HELLO, payload=session_reply).to_bytes(), addr)
-        sock.set_peer_psk(addr, session_psk, cipher)
+        sock.set_peer_psk(addr, session_psk, challenge.cipher)
         sender = USTPSender(
             sock=sock,
             peer=addr,
@@ -203,20 +258,25 @@ def main() -> None:
             loss_percent=args.loss,
         )
         sender.start()
-        print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={cipher}")
+        print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={challenge.cipher} session={challenge.session_id}")
         now = time.time()
-        return ClientSession(
+        session = ClientSession(
             addr=addr,
             sender=sender,
             last_hello_ts=now,
             last_seen_ts=now,
-            cipher=cipher,
+            cipher=challenge.cipher,
             session_psk=session_psk,
-            client_pub=client_pub_raw,
+            client_pub=challenge.client_pub,
             server_pub=host_public,
+            session_id=challenge.session_id,
             session_reply=session_reply,
             created_ts=now,
         )
+        sessions[addr] = session
+        sessions_by_id[challenge.session_id] = session
+        pending_challenges.pop(addr, None)
+        return session
 
     def find_session_by_client_pub(client_pub_raw: bytes) -> tuple[tuple[str, int], ClientSession] | tuple[None, None]:
         for existing_addr, existing_session in sessions.items():
@@ -233,7 +293,7 @@ def main() -> None:
         session.addr = new_addr
         sessions.pop(old_addr, None)
         sessions[new_addr] = session
-        print(f"[USTP-SERVER] client migrated {old_addr[0]}:{old_addr[1]} -> {new_addr[0]}:{new_addr[1]}")
+        print(f"[USTP-SERVER] client migrated {old_addr[0]}:{old_addr[1]} -> {new_addr[0]}:{new_addr[1]} session={session.session_id}")
 
     def ctrl_loop() -> None:
         nonlocal running
@@ -250,7 +310,8 @@ def main() -> None:
                 if args.peer_port and addr[1] != args.peer_port:
                     continue
                 session = None
-                create_pub = None
+                complete_challenge = None
+                issue_challenge = None
                 now = time.time()
 
                 with sessions_lock:
@@ -258,14 +319,9 @@ def main() -> None:
                     if pkt.pkt_type == TYPE_HELLO:
                         parsed = parse_client_hello(pkt.payload)
                         if parsed is not None:
-                            client_pub, requested_cipher = parsed
-                            if session is not None:
-                                session.last_hello_ts = now
-                                if client_pub == session.client_pub:
-                                    pass
-                                else:
-                                    create_pub = (client_pub, requested_cipher)
-                            else:
+                            kind = parsed[0]
+                            if kind == "init":
+                                _, client_pub, requested_cipher = parsed
                                 old_addr, old_session = find_session_by_client_pub(client_pub)
                                 if old_session is not None:
                                     migrate_session(old_addr, addr, old_session)
@@ -273,21 +329,42 @@ def main() -> None:
                                     session.last_hello_ts = now
                                     session.last_seen_ts = now
                                 else:
-                                    create_pub = (client_pub, requested_cipher)
+                                    issue_challenge = (client_pub, requested_cipher)
+                            elif kind == "challenge_reply":
+                                _, token, session_id, client_pub, requested_cipher = parsed
+                                pending = pending_challenges.get(addr)
+                                if pending and pending.token == token and pending.session_id == session_id and pending.client_pub == client_pub:
+                                    complete_challenge = pending
+                                else:
+                                    continue
+                            elif kind == "resume":
+                                _, session_id = parsed
+                                resume_session = sessions_by_id.get(session_id)
+                                if resume_session is not None:
+                                    if resume_session.addr != addr:
+                                        migrate_session(resume_session.addr, addr, resume_session)
+                                    session = resume_session
+                                    session.last_hello_ts = now
+                                    session.last_seen_ts = now
                         elif session is not None:
                             session.last_hello_ts = now
                             session.last_seen_ts = now
                     elif session is not None:
                         session.last_seen_ts = now
 
-                if create_pub is not None:
-                    new = new_session(addr, create_pub[0], create_pub[1])
+                if issue_challenge is not None:
+                    with sessions_lock:
+                        send_challenge(addr, issue_challenge[0], issue_challenge[1])
+                    continue
+
+                if complete_challenge is not None:
                     with sessions_lock:
                         old = sessions.get(addr)
                         if old is not None:
                             old.sender.stop()
                             sock.clear_peer(addr)
-                        sessions[addr] = new
+                            sessions_by_id.pop(old.session_id, None)
+                        session = new_session(addr, complete_challenge)
                     continue
 
                 if session is None:
@@ -363,6 +440,7 @@ def main() -> None:
                             if current is session:
                                 session.sender.stop()
                                 sock.clear_peer(addr)
+                                sessions_by_id.pop(session.session_id, None)
                                 del sessions[addr]
                                 print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]} last_seen={now - session.last_seen_ts:.1f}s")
                         continue
@@ -378,6 +456,7 @@ def main() -> None:
                             try:
                                 session.sender.stop()
                                 sock.clear_peer(addr)
+                                sessions_by_id.pop(session.session_id, None)
                             finally:
                                 sessions.pop(addr, None)
     except KeyboardInterrupt:

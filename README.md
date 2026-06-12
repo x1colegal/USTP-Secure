@@ -25,11 +25,13 @@ This repository, however, is focused specifically on **streaming over USTPS**.
   - `chacha20` (ChaCha20-Poly1305)
   - `aes-256-gcm`
   - `aes-128-gcm`
-- AEAD is mandatory in USTPS (no plaintext mode)
+- AEAD is mandatory for payload `DATA` in USTPS.
+- Transport control packets (`HELLO`, `ACK`, `RETRANSMIT_REQUEST`, `CLOSE`) stay plaintext on purpose.
 - No static PSK is used.
 - Each client performs an X25519 key exchange when it joins.
-- Each client gets a separate ephemeral AEAD session key.
+- Each client gets a separate AEAD session key.
 - Servers support multiple clients.
+- The server first sees a client as `IP:port`, then promotes it to a generated Base64 `session_id` after challenge validation.
 - If `--cipher` is set on the server, the server uses that exact cipher.
 - If `--cipher` is omitted or set to `auto`, the server uses the cipher requested by the client.
 - Clients reject unexpected cipher negotiation.
@@ -49,7 +51,7 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - USTPS is reliable over UDP, but it is **unordered by design**.
 - USTPS does **not** implement congestion control.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
-- `seq` is used for ACK, loss detection, and retransmission.
+- `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
 - The receiver accepts out-of-order packets immediately instead of blocking delivery behind one missing packet.
 
@@ -59,12 +61,24 @@ Example:
 - Packets `5` and `6` are still accepted immediately.
 - When packet `4` arrives later, the application can reconstruct the logical order by using `stream_pos`, not by trusting arrival order.
 
+## Handshake and session model
+- The client starts with a plaintext transport `HELLO` carrying its X25519 public key and requested cipher.
+- The server does not send media immediately. It first sends a plaintext challenge containing:
+  - a random token
+  - a generated Base64 `session_id`
+  - the server public key
+  - the selected cipher
+- The client must answer with that same token.
+- Only after that token round-trip succeeds does the server create the AEAD session and begin sending `DATA`.
+- After validation, the session is tracked by the generated Base64 `session_id`, not just by the original `IP:port`.
+- Future keepalives use that `session_id`, so the server can remap the session if the client source port changes.
+
 ## Retransmission model
 - USTPS uses selective retransmission, not Go-Back-N.
 - Every unique `DATA` packet is ACKed individually.
 - Missing packets trigger `RETRANSMIT_REQUEST` only for the missing `seq`.
 - The sender keeps sent packets in a retransmission buffer until ACKed.
-- RTO also exists as a fallback if explicit retransmission requests are delayed or lost.
+- `RTO` is not fixed-only: it is adapted from measured `RTT` samples of non-retransmitted packets.
 - Only the missing packets are retransmitted.
 
 ## Why it does not have HoL blocking
@@ -182,8 +196,8 @@ tcp://127.0.0.1:1238
 
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
-- USTPS: same UDP transport plus AEAD encryption/authentication per packet.
-- Client exits with explicit error if no valid encrypted packets are received (server offline or handshake failed).
+- USTPS: same UDP transport plus AEAD protection for `DATA`, plaintext transport control, challenge validation before data flow, and per-client session tracking by Base64 `session_id`.
+- Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
 
 ## Internet-Drafts
 - `USTPS` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`

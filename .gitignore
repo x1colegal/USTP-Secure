@@ -26,3 +26,6 @@ received/
 *.txt
 !README.md
 !LICENSE
+
+# .xml files
+*.xml
