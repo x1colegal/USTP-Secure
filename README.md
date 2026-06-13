@@ -28,6 +28,8 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - AEAD is mandatory for payload `DATA` in USTPS.
 - Transport control packets (`HELLO`, `ACK`, `RETRANSMIT_REQUEST`, `CLOSE`) stay plaintext on purpose.
 - Control packets are serialized as ASCII transport records.
+- `ACK` and `NACK`/`RETRANSMIT_REQUEST` remain plaintext, but are authenticated with a per-session HMAC tag.
+- This prevents off-path forged ACK/NACK control packets from forcing ACK attacks or retransmission DoS after the secure session is established.
 - `DATA` packets use a binary frame format named `UPACK` (`UPAK` on the wire).
 - No static PSK is used.
 - Each client performs an X25519 key exchange when it joins.
@@ -89,12 +91,13 @@ Example:
 - The current model is intentionally simpler: prove reachability with a challenge on the current `IP:port`, bind the session to that endpoint, and reconnect if the endpoint changes.
 
 ## Wire format
-- `ACK` is serialized like `ACK: 10` or batched like `ACK: 10 11 12`.
-- `RETRANSMIT_REQUEST` is serialized like `NACK: 42`.
+- `ACK` is serialized like `ACK: 10 MAC:<tag>` or batched like `ACK: 10 11 12 MAC:<tag>`.
+- `RETRANSMIT_REQUEST` is serialized like `NACK: 42 MAC:<tag>`.
 - `HELLO` is serialized like `HELLO: <base64-payload>`.
 - `CLOSE` is serialized like `CLOSE:`.
 - `DATA` uses the binary `UPACK` frame format instead of ASCII to avoid bloating media payload packets.
 - This means captures typically look like readable control lines plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
+- The `MAC:<tag>` value is computed from the session key and is stripped after verification before the packet reaches the transport state machine.
 
 ## Retransmission model
 - USTPS uses selective retransmission, not Go-Back-N.
