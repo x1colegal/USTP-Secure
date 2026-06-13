@@ -212,7 +212,7 @@ python3 client.py \
 ```
 
 Notes:
-- The default playout/reorder delay is now `350ms`.
+- The default playout/reorder delay is now `1500ms`.
 - The client stores the first seen server X25519 public key in `~/.ustps_known_hosts.json`.
 - If that key changes later, the client aborts with a TOFU mismatch error instead of silently trusting the new key.
 - If you intentionally rotated the server host key, run the client with `--regen-key` to allow replacing the stored TOFU key after interactive confirmation.
