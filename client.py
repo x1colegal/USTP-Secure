@@ -145,6 +145,20 @@ def is_temporary_network_error(exc: OSError) -> bool:
     )
 
 
+def is_recoverable_socket_error(exc: BaseException) -> bool:
+    if isinstance(exc, socket.timeout):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    return is_temporary_network_error(exc) or exc.errno in (
+        errno.EBADF,
+        errno.ENOTCONN,
+        errno.ECONNRESET,
+        errno.ECONNREFUSED,
+        errno.EPIPE,
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="USTP Client: USTP/UDP -> TCP or UDP output")
     ap.add_argument("--peer-ip", required=True)
@@ -231,7 +245,7 @@ def main() -> None:
                 peer_candidate = sockaddr
                 recv_candidate = USTPReceiver(sock=usock_candidate, peer=peer_candidate)
                 ready = False
-                deadline = time.time() + 3.0
+                deadline = time.time() + (0.7 if prefer_resume else 2.0)
                 while time.time() < deadline and running:
                     try:
                         if prefer_resume and local_session_id:
@@ -260,6 +274,11 @@ def main() -> None:
                         raw, addr = usock_candidate.recvfrom(65535)
                     except socket.timeout:
                         continue
+                    except OSError as exc:
+                        if is_recoverable_socket_error(exc):
+                            temp_network_blocked = True
+                            break
+                        raise
                     if addr != peer_candidate:
                         continue
                     pkt = parse_packet(raw)
@@ -325,7 +344,7 @@ def main() -> None:
                             last_rx_ts = time.time()
                             last_valid_data_ts = time.time()
                             connection_epoch += 1
-                        if prefer_resume or old_session_id != new_session_id:
+                        if old_session_id != new_session_id:
                             reset_local_stream_state("path-recovery")
                         if old_raw is not None and old_raw is not raw_candidate:
                             try:
@@ -412,7 +431,10 @@ def main() -> None:
             return
 
         def output_send(data: bytes) -> None:
-            usock_out.sendto(data, (args.udp_ip, args.udp_port))
+            try:
+                usock_out.sendto(data, (args.udp_ip, args.udp_port))
+            except OSError:
+                pass
 
     threads: list[threading.Thread] = []
 
@@ -460,12 +482,18 @@ def main() -> None:
                 local_recv = recv
                 local_session_ready = session_ready
             if local_session_ready and local_recv is not None:
-                local_recv.maybe_nack()
+                try:
+                    local_recv.maybe_nack()
+                except OSError:
+                    pass
+                except Exception:
+                    pass
             time.sleep(0.03)
 
     def recv_loop() -> None:
         nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, ordered_release_at, stream_resync_needed
         nonlocal session_ready, session_id, challenge_token
+        nonlocal running
         local_epoch = -1
         while running:
             with state_lock:
@@ -490,8 +518,9 @@ def main() -> None:
                     errno.ENETUNREACH,
                     errno.EHOSTUNREACH,
                 ):
-                    time.sleep(0.05)
-                    continue
+                    print(f"[USTP-CLIENT] network/socket unavailable: {exc}; exiting")
+                    running = False
+                    break
                 continue
             except Exception:
                 continue
@@ -566,6 +595,7 @@ def main() -> None:
                 local_recv.handle_data(pkt)
             if args.output_mode == "udp" and args.udp_unordered_live:
                 output_send(pkt.payload)
+                continue
 
             with reorder_lock:
                 if stream_resync_needed and not out_by_pos and next_out_pos == 0:
@@ -602,40 +632,11 @@ def main() -> None:
                             f"reconstructed_until={next_out_pos}"
                         )
 
-    def recovery_loop() -> None:
-        nonlocal recovery_in_progress, last_recovery_attempt_ts, session_ready, challenge_token, last_recovery_was_temp_network
-        while running:
-            now = time.time()
-            need_recover = False
-            with state_lock:
-                local_session_ready = session_ready
-                local_last_rx = last_rx_ts
-                local_peer = peer
-            if local_session_ready and local_peer is not None and (now - local_last_rx) > 3.0:
-                need_recover = True
-            if need_recover and not recovery_in_progress and (now - last_recovery_attempt_ts) > 2.0:
-                recovery_in_progress = True
-                last_recovery_attempt_ts = now
-                try:
-                    print("[USTP-CLIENT] transport stalled; trying path recovery")
-                    with state_lock:
-                        session_ready = False
-                    if not connect_transport(prefer_resume=True):
-                        if not last_recovery_was_temp_network:
-                            challenge_token = None
-                            connect_transport(prefer_resume=False)
-                        elif running:
-                            print("[USTP-CLIENT] temporary network loss detected; waiting for the same path to come back")
-                finally:
-                    recovery_in_progress = False
-            time.sleep(0.5)
-
     if args.output_mode == "tcp":
         threads.append(threading.Thread(target=accept_loop, daemon=True, name="ustps-accept"))
     threads.append(threading.Thread(target=keepalive_loop, daemon=True, name="ustps-keepalive"))
     threads.append(threading.Thread(target=nack_loop, daemon=True, name="ustps-nack"))
     threads.append(threading.Thread(target=recv_loop, daemon=True, name="ustps-recv"))
-    threads.append(threading.Thread(target=recovery_loop, daemon=True, name="ustps-recover"))
     for thread in threads:
         thread.start()
 
@@ -645,16 +646,17 @@ def main() -> None:
         print(f"[USTP-CLIENT] UDP output on udp://{args.udp_ip}:{args.udp_port}")
 
     try:
-        while True:
+        while running:
             now = time.time()
             if session_ready and last_valid_data_ts and now - last_valid_data_ts > 6.0 and now - last_stall_log_ts > 6.0:
                 if running:
-                    print("[USTP-CLIENT] no data for 6s; waiting or recovering path")
+                    print("[USTP-CLIENT] no data for 6s; waiting before clean reconnect exit")
                 last_stall_log_ts = now
-            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 60.0 and now - last_stall_log_ts > 6.0:
+            if session_ready and last_valid_data_ts and now - last_valid_data_ts > 10.0:
                 if running:
-                    print("[USTP-CLIENT] no data for 60s; session kept alive, still waiting for stream")
+                    print("[USTP-CLIENT] no data for 10s; exiting so the session can reconnect cleanly")
                 last_stall_log_ts = now
+                break
             time.sleep(1.0)
     except KeyboardInterrupt:
         print("[USTP-CLIENT] Interrupted")

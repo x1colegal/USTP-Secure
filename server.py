@@ -278,23 +278,6 @@ def main() -> None:
         pending_challenges.pop(addr, None)
         return session
 
-    def find_session_by_client_pub(client_pub_raw: bytes) -> tuple[tuple[str, int], ClientSession] | tuple[None, None]:
-        for existing_addr, existing_session in sessions.items():
-            if existing_session.client_pub == client_pub_raw:
-                return existing_addr, existing_session
-        return None, None
-
-    def migrate_session(old_addr: tuple[str, int], new_addr: tuple[str, int], session: ClientSession) -> None:
-        if old_addr == new_addr:
-            return
-        sock.clear_peer(old_addr)
-        sock.set_peer_psk(new_addr, session.session_psk, session.cipher)
-        session.sender.peer = new_addr
-        session.addr = new_addr
-        sessions.pop(old_addr, None)
-        sessions[new_addr] = session
-        print(f"[USTP-SERVER] client migrated {old_addr[0]}:{old_addr[1]} -> {new_addr[0]}:{new_addr[1]} session={session.session_id}")
-
     def ctrl_loop() -> None:
         nonlocal running
         while running:
@@ -322,12 +305,10 @@ def main() -> None:
                             kind = parsed[0]
                             if kind == "init":
                                 _, client_pub, requested_cipher = parsed
-                                old_addr, old_session = find_session_by_client_pub(client_pub)
-                                if old_session is not None:
-                                    migrate_session(old_addr, addr, old_session)
-                                    session = old_session
+                                if session is not None and session.client_pub == client_pub:
                                     session.last_hello_ts = now
                                     session.last_seen_ts = now
+                                    sock.send_plain(mkp(TYPE_HELLO, payload=session.session_reply).to_bytes(), addr)
                                 else:
                                     issue_challenge = (client_pub, requested_cipher)
                             elif kind == "challenge_reply":
@@ -340,12 +321,11 @@ def main() -> None:
                             elif kind == "resume":
                                 _, session_id = parsed
                                 resume_session = sessions_by_id.get(session_id)
-                                if resume_session is not None:
-                                    if resume_session.addr != addr:
-                                        migrate_session(resume_session.addr, addr, resume_session)
+                                if resume_session is not None and resume_session.addr == addr:
                                     session = resume_session
                                     session.last_hello_ts = now
                                     session.last_seen_ts = now
+                                    sock.send_plain(mkp(TYPE_HELLO, payload=session.session_reply).to_bytes(), addr)
                         elif session is not None:
                             session.last_hello_ts = now
                             session.last_seen_ts = now
@@ -427,9 +407,9 @@ def main() -> None:
                 try:
                     stats = session.sender.get_stats()
                     if stats["pending"] > args.max_pending_packets and stats["last_progress_age"] > args.stalled_progress_timeout:
-                        session.sender.reset_session()
+                        session.sender.drop_backlog_keep_sequence()
                         print(
-                            f"[USTP-SERVER] stalled session reset {addr[0]}:{addr[1]} "
+                            f"[USTP-SERVER] stalled backlog dropped {addr[0]}:{addr[1]} "
                             f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
                             f"last_progress={stats['last_progress_age']:.1f}s"
                         )

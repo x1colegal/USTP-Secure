@@ -33,7 +33,7 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Each client performs an X25519 key exchange when it joins.
 - Each client gets a separate AEAD session key.
 - Servers support multiple clients.
-- The server first sees a client as `IP:port`, then promotes it to a generated Base64 `session_id` after challenge validation.
+- The server validates the client with a challenge round-trip on the source `IP:port`.
 - If `--cipher` is set on the server, the server uses that exact cipher.
 - If `--cipher` is omitted or set to `auto`, the server uses the cipher requested by the client.
 - Clients reject unexpected cipher negotiation.
@@ -74,14 +74,19 @@ Example:
   - the selected cipher
 - The client must answer with that same token.
 - Only after that token round-trip succeeds does the server create the AEAD session and begin sending `DATA`.
-- After validation, the session is tracked by the generated Base64 `session_id`, not just by the original `IP:port`.
-- Future keepalives use that `session_id`, so the server can remap the session if the client source port changes.
+- After validation, the session is bound to the source `IP:port` that completed the challenge.
+- `session_id` is still used as a session label, but it is not accepted from a different `IP:port`.
 
 ## Network change support
-- The USTPS client can recover when the device changes networks and the UDP path breaks.
-- If the current path stalls, the client recreates its UDP socket, resolves the server address again, and tries to resume the existing session by `session_id`.
-- If session resume is not possible, the client falls back to a fresh handshake automatically.
-- This is designed so a mobile client can switch networks without immediately being forced to restart the client process.
+- Automatic network/path migration has been removed from this implementation.
+- If the client changes network and its source `IP:port` changes, the current session is expected to end and the client should reconnect cleanly.
+- The migration implementation was removed because it caused practical reliability and security problems:
+  - repeated migration floods when NAT or mobile networks changed paths quickly
+  - stale sessions that looked recovered but no longer delivered media
+  - long silent periods followed by GAP-only behavior
+  - ambiguity between a real roaming client and spoofed packets claiming an existing `session_id`
+  - complex recovery state that could reset stream ordering or retransmission state at the wrong time
+- The current model is intentionally simpler: prove reachability with a challenge on the current `IP:port`, bind the session to that endpoint, and reconnect if the endpoint changes.
 
 ## Wire format
 - `ACK` is serialized like `ACK: 10` or batched like `ACK: 10 11 12`.
@@ -104,10 +109,10 @@ Example:
 - `NACK`: the receiver detected a missing `seq` and explicitly requested retransmission of that missing packet only.
 - `GAP`: the client received a packet whose `stream_pos` is ahead of the next ordered output position, so there is currently a hole in the logical byte stream.
 - `RECOVERY`: a late packet arrived with `stream_pos` below the current frontier, meaning an earlier gap is being repaired or was repaired after newer data had already been seen.
-- `RESYNC`: after a path recovery, the client anchored ordered output to the first new `stream_pos` seen on the recovered path instead of staying stuck forever on an old pre-failure gap.
+- `RESYNC`: the client anchored ordered output to a new `stream_pos` after a clean stream-state reset.
 - `RTO`: retransmission timeout. The sender did not see ACK progress in time, so it queued a packet for retry even without an explicit NACK.
-- `transport stalled; trying path recovery`: the client stopped receiving packets on the current UDP path and is trying to rebuild the path or resume the session.
-- `stream state reset reason=path-recovery`: after a path recovery, the client cleared its local reorder/gap state so it does not get stuck forever waiting on an old hole from the dead path.
+- `no data for 10s`: the client did not receive stream data for long enough and exits so a new clean session can be started.
+- `stream state reset`: the client cleared local reorder/gap state after a clean new stream/session boundary.
 
 ## Why it does not have HoL blocking
 - TCP has transport-level Head-of-Line blocking: if one segment is missing, later data in the same byte stream cannot be delivered to the application yet.
@@ -224,7 +229,7 @@ tcp://127.0.0.1:1238
 
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
-- USTPS: same UDP transport plus AEAD protection for `DATA`, human-readable plaintext transport control, challenge validation before data flow, and per-client session tracking by Base64 `session_id`.
+- USTPS: same UDP transport plus AEAD protection for `DATA`, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
 - Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
 
 ## Internet-Drafts
