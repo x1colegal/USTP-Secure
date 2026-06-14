@@ -199,8 +199,9 @@ def main() -> None:
     ap.add_argument(
         "--video-parameters",
         default="",
-        help="Optional ffmpeg parameters to use instead of the default '-c copy -mpegts_flags +resend_headers'",
+        help="Optional ffmpeg parameters to use instead of the default copy-mode settings",
     )
+    ap.add_argument("--stream-container", default="mpegts", help="FFmpeg output container/muxer name. Default: mpegts")
     ap.add_argument("--window", type=int, default=512)
     ap.add_argument("--rto", type=float, default=0.25)
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
@@ -357,12 +358,13 @@ def main() -> None:
 
     threading.Thread(target=ctrl_loop, daemon=True).start()
 
-    ffmpeg_video_args = shlex.split(args.video_parameters) if args.video_parameters.strip() else [
-        "-c",
-        "copy",
-        "-mpegts_flags",
-        "+resend_headers",
-    ]
+    stream_container = args.stream_container.strip() or "mpegts"
+    if args.video_parameters.strip():
+        ffmpeg_video_args = shlex.split(args.video_parameters)
+    else:
+        ffmpeg_video_args = ["-c", "copy"]
+        if stream_container == "mpegts":
+            ffmpeg_video_args += ["-mpegts_flags", "+resend_headers"]
     cmd = [
         "ffmpeg",
         "-re",
@@ -372,7 +374,7 @@ def main() -> None:
         args.video,
         *ffmpeg_video_args,
         "-f",
-        "mpegts",
+        stream_container,
         "-",
     ]
     print("[USTP-SERVER]", " ".join(cmd))

@@ -154,8 +154,19 @@ python3 server.py \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
+  --stream-container mpegts \
   --cipher chacha20
 ```
+
+The default stream container is `mpegts` because it is the most reliable option with VLC in the current TCP-local playback path.
+
+You can change the FFmpeg muxer/container with `--stream-container`.
+
+Examples:
+- `--stream-container mpegts` (default, classic MPEG-TS compatibility)
+- `--stream-container flv` (experimental here; VLC may misdetect it as audio-only in this pipeline)
+- `--stream-container nut` (low overhead FFmpeg-native streaming container, but VLC may not open it)
+- `--stream-container matroska` (MKV/Matroska)
 
 If you want custom ffmpeg encoding/transcoding parameters instead of the default copy mode, use `--video-parameters`.
 
@@ -166,13 +177,16 @@ python3 server.py \
   --bind-ip 0.0.0.0 \
   --bind-port 40001 \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
-  --video-parameters "-c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k -mpegts_flags +resend_headers" \
+  --stream-container mpegts \
+  --video-parameters "-c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k" \
   --cipher chacha20
 ```
 
 Behavior:
-- without `--video-parameters`: uses `-c copy -mpegts_flags +resend_headers`
+- without `--video-parameters`: uses `-c copy`
+- with `--stream-container mpegts` and no `--video-parameters`: also adds `-mpegts_flags +resend_headers`
 - with `--video-parameters`: uses exactly what you passed instead of the default copy settings
+- the selected container is always passed to FFmpeg as `-f <stream-container>`
 
 ## About `--loss`
 - `--loss` simulates outbound packet loss on the server side for testing recovery behavior.
