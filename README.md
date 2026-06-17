@@ -22,9 +22,10 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 ## Security model
 - Transport remains UDP (no TCP tunnel)
 - AEAD ciphers:
-  - `chacha20` (ChaCha20-Poly1305)
-  - `aes-256-gcm`
-  - `aes-128-gcm`
+  - `chacha20` = `CHACHA20_POLY1305`
+  - `aes-256-gcm` = `AES_256_GCM`
+  - `aes-128-gcm` = `AES_128_GCM`
+- Default AEAD cipher: `chacha20`
 - AEAD is mandatory for payload `DATA` in USTPS.
 - Transport control packets (`HELLO`, `ACK`, `RETRANSMIT_REQUEST`, `CLOSE`) stay plaintext on purpose.
 - Control packets are serialized as ASCII transport records.
