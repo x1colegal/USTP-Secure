@@ -359,7 +359,6 @@ tcp://127.0.0.1:1238
 
 ## Internet-Drafts
 - `USTPS` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
-- Repository draft snapshot: `internet-drafts/draft-x1co-ustps-06.xml`
 
 ## Related projects
 - `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTPS:
