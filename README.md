@@ -2,7 +2,11 @@
 
 USTPS means **UDP Speedy Transmission Protocol Secure**.
 
-USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
+USTP-Secure keeps USTP on UDP and adds authenticated packet protection.
+
+By default, USTPS uses AEAD for `DATA`.
+
+It also supports an optional negotiated `cleartext + HMAC` mode for `DATA`, where payload bytes are visible on the wire but tampering is detected and rejected.
 
 USTPS now supports an optional congestion controller called `USTPS Congestion`. It is still UDP-first and still keeps unordered delivery, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
 
@@ -26,7 +30,9 @@ This repository, however, is focused specifically on **streaming over USTPS**.
   - `aes-256-gcm` = `AES_256_GCM`
   - `aes-128-gcm` = `AES_128_GCM`
 - Default AEAD cipher: `chacha20`
-- AEAD is mandatory for payload `DATA` in USTPS.
+- Default `DATA` protection mode is AEAD.
+- Optional `DATA` protection mode is cleartext + per-packet HMAC.
+- In cleartext mode, payload bytes are not encrypted, but modifications are detected and invalid packets are discarded.
 - Transport control packets (`HELLO`, `ACK`, `RETRANSMIT_REQUEST`, `CLOSE`) stay plaintext on purpose.
 - Control packets are serialized as ASCII transport records.
 - `ACK` and `NACK`/`RETRANSMIT_REQUEST` remain plaintext, but are authenticated with a per-session HMAC tag.
@@ -40,6 +46,14 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - If `--cipher` is set on the server, the server uses that exact cipher.
 - If `--cipher` is omitted or set to `auto`, the server uses the cipher requested by the client.
 - Clients reject unexpected cipher negotiation.
+- `DATA` protection mode is negotiated separately from cipher choice:
+  - server: `--cleartext auto|on|off`
+  - client: `--cleartext on|off`
+  - server default: `auto`
+  - client default: `off`
+- With server `auto`, the server follows the client request.
+- With server `on`, the server forces cleartext + HMAC.
+- With server `off`, the server forces AEAD.
 - TOFU (Trust On First Use) is enabled on the client to detect unexpected server key changes after the first connection.
 - The server keeps a persistent X25519 host key in `~/.ustps_host_key` by default so TOFU remains stable across reconnects and restarts.
 - A normal server restart does not change the host key.
@@ -48,11 +62,16 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 ## Packet magic values
 - `ACK:`, `NACK:`, `HELLO:`, and `CLOSE:` are the plaintext control record prefixes.
 - `USS1` means `UDP Speedy Secure`, version 1.
+- `USC1` means `UDP Speedy Clear`, version 1.
 - `UPAK` is the binary `UPACK` DATA frame marker.
 - In USTPS, plaintext control is human-readable ASCII such as `ACK: 10`, `NACK: 42`, `HELLO: ...`, and `CLOSE:`.
 - In USTPS, `UPAK` identifies binary DATA packets after decryption.
 - In USTPS, `USS1` is the outer secure AEAD envelope format.
-- So, before decryption you normally see `USS1`, and after decryption you normally see either readable control lines or `UPAK...` for DATA.
+- In USTPS, `USC1` is the outer cleartext+HMAC `DATA` envelope format.
+- So, on the wire you normally see:
+  - `USS1...` for AEAD-protected `DATA`
+  - `USC1...` for cleartext+HMAC `DATA`
+  - readable control lines for transport control
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
@@ -71,15 +90,16 @@ Example:
 - When packet `4` arrives later, the application can reconstruct the logical order by using `stream_pos`, not by trusting arrival order.
 
 ## Handshake and session model
-- The client starts with a plaintext transport `HELLO` carrying its X25519 public key, requested cipher, and requested congestion-control mode (`on` or `off`).
+- The client starts with a plaintext transport `HELLO` carrying its X25519 public key, requested cipher, requested congestion-control mode (`on` or `off`), and requested `DATA` protection mode (`cleartext on|off`).
 - The server does not send media immediately. It first sends a plaintext challenge containing:
   - a random retry token
   - a generated Base64 `session_id`
   - the selected cipher
   - the negotiated congestion-control mode
+  - the negotiated `DATA` protection mode
   - the server public key
 - The client must answer with that exact same token and session metadata.
-- Only after that token round-trip succeeds does the server create the AEAD session and begin sending `DATA`.
+- Only after that token round-trip succeeds does the server create the session and begin sending `DATA`.
 - After validation, the session is bound to the source `IP:port` that completed the challenge.
 - `session_id` is still used as a session label, but it is not accepted from a different `IP:port`.
 
@@ -87,9 +107,9 @@ Example:
 - USTPS uses a plaintext retry-token step before any encrypted media session is accepted.
 - Flow:
   - client sends `HELLO`
-  - server replies with `USTPS-CHALLENGE1` carrying `token`, `session_id`, selected cipher, negotiated congestion-control mode, and server public key
+  - server replies with `USTPS-CHALLENGE1` carrying `token`, `session_id`, selected cipher, negotiated congestion-control mode, negotiated `DATA` protection mode, and server public key
   - client echoes that token back in `USTPS-CHALLENGE-REPLY1`
-  - only then does the server create the AEAD session and send `USTPS-SESSION1`
+  - only then does the server create the session and send `USTPS-SESSION1`
 - Purpose:
   - prove that the sender at that source `IP:port` can actually receive packets there
   - avoid sending encrypted media immediately to an unvalidated source address
@@ -101,12 +121,16 @@ Example:
 ## MTU, PMTU, and fragmentation
 - Current `UPACK` DATA payload limit: `1200` bytes.
 - `UPACK` fixed header: `20` bytes.
-- Outer `USS1` secure envelope overhead in the current implementation:
+- Outer `USS1` secure envelope overhead in AEAD mode:
   - `4` bytes magic
   - `1` byte cipher id
   - `12` bytes AEAD nonce
   - `16` bytes AEAD tag
 - So the encrypted USTPS DATA datagram is about `1253` bytes before IP/UDP headers.
+- Outer `USC1` cleartext envelope overhead in cleartext mode:
+  - `4` bytes magic
+  - `16` bytes HMAC tag
+- So the cleartext USTPS DATA datagram is about `1240` bytes before IP/UDP headers.
 - With IPv4 + UDP headers, that is about `1281` bytes on the wire.
 - With IPv6 + UDP headers, that is about `1301` bytes on the wire.
 - USTPS currently does **not** implement transport-level fragmentation.
@@ -127,6 +151,7 @@ Example:
 - `seq` is for transport reliability.
 - `stream_pos` is for logical application ordering.
 - `nonce` is only for AEAD packet protection.
+- Cleartext+HMAC mode does not use an AEAD nonce because it does not use AEAD encryption for `DATA`.
 
 ## USTPS Congestion
 - `USTPS Congestion` is optional.
@@ -167,7 +192,8 @@ Example:
 - `HELLO` is serialized like `HELLO: <base64-payload>`.
 - `CLOSE` is serialized like `CLOSE:`.
 - `DATA` uses the binary `UPACK` frame format instead of ASCII to avoid bloating media payload packets.
-- This means captures typically look like readable control lines plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
+- In AEAD mode, captures typically look like readable control lines plus encrypted `USS1...` datagrams that decrypt to `UPAK...` DATA frames.
+- In cleartext mode, captures typically look like readable control lines plus authenticated `USC1...` datagrams carrying visible `UPACK` bytes and an HMAC tag.
 - The `MAC:<tag>` value is computed from the session key and is stripped after verification before the packet reaches the transport state machine.
 
 ## Retransmission model
@@ -218,7 +244,7 @@ Important:
 - USTPS:
   USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. If `USTPS Congestion` is enabled, the sender may slow or speed up, but that does not change the unordered transport model.
 
-## Server (AEAD enabled)
+## Server
 ```bash
 python3 server.py \
   --peer-port 0 \
@@ -227,7 +253,8 @@ python3 server.py \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
   --stream-container mpegts \
   --cipher chacha20 \
-  --congestion-control auto
+  --congestion-control auto \
+  --cleartext auto
 ```
 
 The default stream container is `mpegts` because it is the most reliable option with VLC in the current TCP-local playback path.
@@ -251,7 +278,8 @@ python3 server.py \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
   --stream-container mpegts \
   --video-parameters "-c:v libx264 -preset veryfast -b:v 2500k -c:a aac -b:a 128k" \
-  --cipher chacha20
+  --cipher chacha20 \
+  --cleartext off
 ```
 
 Behavior:
@@ -284,7 +312,7 @@ python3 server.py \
   - playback resilience under controlled packet loss
 - In normal real-world usage, leave `--loss` at `0`.
 
-## Client (AEAD enabled)
+## Client
 ```bash
 python3 client.py \
   --peer-ip <SERVER_IP_OR_DOMAIN> \
@@ -295,8 +323,15 @@ python3 client.py \
   --tcp-host 127.0.0.1 \
   --tcp-port 1238 \
   --cipher chacha20 \
-  --congestion-control off
+  --congestion-control off \
+  --cleartext off
 ```
+
+Examples:
+- Request normal AEAD mode:
+  - `--cleartext off`
+- Request cleartext + HMAC mode:
+  - `--cleartext on`
 
 Notes:
 - The default playout/reorder delay is now `1500ms`.
@@ -319,11 +354,12 @@ tcp://127.0.0.1:1238
 
 ## USTP vs USTPS
 - USTP: reliable UDP transport, no encryption by default.
-- USTPS: same UDP transport plus AEAD protection for `DATA`, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
+- USTPS: same UDP transport plus authenticated `DATA` protection, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
 - Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
 
 ## Internet-Drafts
 - `USTPS` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
+- Repository draft snapshot: `internet-drafts/draft-x1co-ustps-06.xml`
 
 ## Related projects
 - `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTPS:

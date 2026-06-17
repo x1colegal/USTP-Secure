@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, mkp
+from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_CLOSE, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, mkp
 from ustp import USTPSender, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
 HELLO_PREFIX = b"USTPS-KEX1\0"
@@ -40,6 +40,7 @@ class ClientSession:
     server_pub: bytes
     session_id: str
     session_reply: bytes
+    cleartext: bool
     next_stream_pos: int = 0
     created_ts: float = 0.0
 
@@ -50,6 +51,7 @@ class PendingChallenge:
     client_pub: bytes
     cipher: str
     congestion_control: str
+    cleartext: str
     session_id: str
     token: str
     created_ts: float
@@ -72,17 +74,15 @@ def b64u(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def parse_hello_options(raw: bytes) -> tuple[str | None, str | None]:
+def parse_hello_options(raw: bytes) -> tuple[str | None, str | None, str | None]:
     if not raw:
-        return None, None
+        return None, None, None
     try:
         text = raw.decode("ascii", "replace")
     except Exception:
-        return None, None
-    if "\0" in text:
-        cipher_text, _, cc_text = text.partition("\0")
-    else:
-        cipher_text, cc_text = text, ""
+        return None, None, None
+    parts = text.split("\0")
+    cipher_text = parts[0] if parts else ""
     cipher = None
     if cipher_text:
         try:
@@ -90,14 +90,28 @@ def parse_hello_options(raw: bytes) -> tuple[str | None, str | None]:
         except Exception:
             cipher = None
     cc_mode = None
-    if cc_text.startswith("cc="):
-        value = cc_text[3:].strip().lower()
-        if value in {"on", "off"}:
-            cc_mode = value
-    return cipher, cc_mode
+    cleartext_mode = None
+    for part in parts[1:]:
+        if part.startswith("cc="):
+            value = part[3:].strip().lower()
+            if value in {"on", "off"}:
+                cc_mode = value
+        elif part.startswith("ct="):
+            value = part[3:].strip().lower()
+            if value in {"on", "off"}:
+                cleartext_mode = value
+    return cipher, cc_mode, cleartext_mode
 
 
 def resolve_server_cc_mode(server_mode: str, client_mode: str | None) -> str:
+    if server_mode == "on":
+        return "on"
+    if server_mode == "off":
+        return "off"
+    return "on" if client_mode == "on" else "off"
+
+
+def resolve_server_cleartext_mode(server_mode: str, client_mode: str | None) -> str:
     if server_mode == "on":
         return "on"
     if server_mode == "off":
@@ -113,23 +127,24 @@ def parse_client_hello(payload: bytes):
         client_pub = rest[:32]
         cipher = None
         congestion_control = None
+        cleartext = None
         if len(rest) > 32:
-            cipher, congestion_control = parse_hello_options(rest[32:])
-        return ("init", client_pub, cipher, congestion_control)
+            cipher, congestion_control, cleartext = parse_hello_options(rest[32:])
+        return ("init", client_pub, cipher, congestion_control, cleartext)
     if payload.startswith(RESPONSE_PREFIX):
         rest = payload[len(RESPONSE_PREFIX) :]
-        parts = rest.split(b"\0", 4)
-        if len(parts) != 5 or len(parts[4]) != 32:
+        parts = rest.split(b"\0", 5)
+        if len(parts) != 6 or len(parts[5]) != 32:
             return None
         try:
             token = parts[0].decode("ascii", "replace")
             session_id = parts[1].decode("ascii", "replace")
-            cipher, congestion_control = parse_hello_options(parts[2] + b"\0" + parts[3])
+            cipher, congestion_control, cleartext = parse_hello_options(parts[2] + b"\0" + parts[3] + b"\0" + parts[4])
             if cipher is None:
                 return None
         except Exception:
             return None
-        return ("challenge_reply", token, session_id, parts[4], cipher, congestion_control)
+        return ("challenge_reply", token, session_id, parts[5], cipher, congestion_control, cleartext)
     if payload.startswith(RESUME_PREFIX):
         rest = payload[len(RESUME_PREFIX) :]
         try:
@@ -241,6 +256,7 @@ def main() -> None:
     ap.add_argument("--loss", type=int, default=0, help="Simulated outbound packet loss percent (0-100)")
     ap.add_argument("--cipher", default="auto", help="auto | chacha20 | aes-256-gcm | aes-128-gcm")
     ap.add_argument("--congestion-control", choices=["auto", "on", "off"], default="auto", help="Server-side USTPS Congestion policy")
+    ap.add_argument("--cleartext", choices=["auto", "on", "off"], default="auto", help="Server-side cleartext DATA policy")
     ap.add_argument("--host-key-file", default=os.path.expanduser("~/.ustps_host_key"))
     ap.add_argument("--regen-key", action="store_true", help="Regenerate the persistent server host key after interactive confirmation")
     ap.add_argument("--stalled-progress-timeout", type=float, default=20.0, help="Drop a session if ACK progress stops for too long while queues keep growing")
@@ -259,32 +275,40 @@ def main() -> None:
     sessions_lock = threading.Lock()
 
     print(
-        f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} default-aead={selected_cipher or 'auto'} multi-client=on"
+        f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} default-aead={selected_cipher or 'auto'} cleartext={args.cleartext} multi-client=on"
     )
 
     running = True
 
-    def send_challenge(addr: tuple[str, int], client_pub_raw: bytes, requested_cipher: str | None, requested_cc: str | None) -> None:
+    def send_challenge(addr: tuple[str, int], client_pub_raw: bytes, requested_cipher: str | None, requested_cc: str | None, requested_cleartext: str | None) -> None:
         cipher = selected_cipher or requested_cipher or "chacha20"
         cc_mode = resolve_server_cc_mode(args.congestion_control, requested_cc)
+        cleartext_mode = resolve_server_cleartext_mode(args.cleartext, requested_cleartext)
+        print(
+            f"[USTP-SERVER] challenge {addr[0]}:{addr[1]} "
+            f"req_cipher={requested_cipher!r} req_cc={requested_cc!r} req_cleartext={requested_cleartext!r} "
+            f"final_cipher={cipher} final_cc={cc_mode} final_cleartext={cleartext_mode}"
+        )
         challenge = pending_challenges.get(addr)
         if (
             challenge is None
             or challenge.client_pub != client_pub_raw
             or challenge.cipher != cipher
             or challenge.congestion_control != cc_mode
+            or challenge.cleartext != cleartext_mode
         ):
             challenge = PendingChallenge(
                 addr=addr,
                 client_pub=client_pub_raw,
                 cipher=cipher,
                 congestion_control=cc_mode,
+                cleartext=cleartext_mode,
                 session_id=b64u(secrets.token_bytes(18)),
                 token=b64u(secrets.token_bytes(18)),
                 created_ts=time.time(),
             )
             pending_challenges[addr] = challenge
-        payload = CHALLENGE_PREFIX + challenge.token.encode("ascii") + b"\0" + challenge.session_id.encode("ascii") + b"\0" + challenge.cipher.encode("ascii") + b"\0" + challenge.congestion_control.encode("ascii") + b"\0" + host_public
+        payload = CHALLENGE_PREFIX + challenge.token.encode("ascii") + b"\0" + challenge.session_id.encode("ascii") + b"\0" + challenge.cipher.encode("ascii") + b"\0cc=" + challenge.congestion_control.encode("ascii") + b"\0ct=" + challenge.cleartext.encode("ascii") + b"\0" + host_public
         sock.send_plain(mkp(TYPE_HELLO, payload=payload).to_bytes(), addr)
 
     def new_session(addr: tuple[str, int], challenge: PendingChallenge) -> ClientSession:
@@ -295,13 +319,15 @@ def main() -> None:
             + challenge.session_id.encode("ascii")
             + b"\0"
             + challenge.cipher.encode("ascii")
-            + b"\0"
+            + b"\0cc="
             + challenge.congestion_control.encode("ascii")
+            + b"\0ct="
+            + challenge.cleartext.encode("ascii")
             + b"\0"
             + host_public
         )
         sock.send_plain(mkp(TYPE_HELLO, payload=session_reply).to_bytes(), addr)
-        sock.set_peer_psk(addr, session_psk, challenge.cipher)
+        sock.set_peer_psk(addr, session_psk, challenge.cipher, cleartext=(challenge.cleartext == "on"))
         sender = USTPSender(
             sock=sock,
             peer=addr,
@@ -311,7 +337,7 @@ def main() -> None:
             congestion_control=(challenge.congestion_control == "on"),
         )
         sender.start()
-        print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={challenge.cipher} cc={challenge.congestion_control} session={challenge.session_id}")
+        print(f"[USTP-SERVER] client joined {addr[0]}:{addr[1]} cipher={challenge.cipher} cc={challenge.congestion_control} cleartext={challenge.cleartext} session={challenge.session_id}")
         now = time.time()
         session = ClientSession(
             addr=addr,
@@ -324,6 +350,7 @@ def main() -> None:
             server_pub=host_public,
             session_id=challenge.session_id,
             session_reply=session_reply,
+            cleartext=(challenge.cleartext == "on"),
             created_ts=now,
         )
         sessions[addr] = session
@@ -357,15 +384,36 @@ def main() -> None:
                         if parsed is not None:
                             kind = parsed[0]
                             if kind == "init":
-                                _, client_pub, requested_cipher, requested_cc = parsed
-                                if session is not None and session.client_pub == client_pub:
+                                _, client_pub, requested_cipher, requested_cc, requested_cleartext = parsed
+                                desired_cipher = selected_cipher or requested_cipher or "chacha20"
+                                desired_cc = resolve_server_cc_mode(args.congestion_control, requested_cc)
+                                desired_cleartext = resolve_server_cleartext_mode(args.cleartext, requested_cleartext)
+                                if (
+                                    session is not None
+                                    and session.client_pub == client_pub
+                                    and session.cipher == desired_cipher
+                                    and session.sender.congestion_control == (desired_cc == "on")
+                                    and session.cleartext == (desired_cleartext == "on")
+                                ):
+                                    print(
+                                        f"[USTP-SERVER] reusing session {addr[0]}:{addr[1]} "
+                                        f"cipher={session.cipher} cc={'on' if session.sender.congestion_control else 'off'} "
+                                        f"cleartext={'on' if session.cleartext else 'off'}"
+                                    )
                                     session.last_hello_ts = now
                                     session.last_seen_ts = now
                                     sock.send_plain(mkp(TYPE_HELLO, payload=session.session_reply).to_bytes(), addr)
                                 else:
-                                    issue_challenge = (client_pub, requested_cipher, requested_cc)
+                                    if session is not None and session.client_pub == client_pub:
+                                        print(
+                                            f"[USTP-SERVER] session mismatch {addr[0]}:{addr[1]} "
+                                            f"existing_cipher={session.cipher} desired_cipher={desired_cipher} "
+                                            f"existing_cc={'on' if session.sender.congestion_control else 'off'} desired_cc={desired_cc} "
+                                            f"existing_cleartext={'on' if session.cleartext else 'off'} desired_cleartext={desired_cleartext}"
+                                        )
+                                    issue_challenge = (client_pub, requested_cipher, requested_cc, requested_cleartext)
                             elif kind == "challenge_reply":
-                                _, token, session_id, client_pub, requested_cipher, requested_cc = parsed
+                                _, token, session_id, client_pub, requested_cipher, requested_cc, requested_cleartext = parsed
                                 pending = pending_challenges.get(addr)
                                 if (
                                     pending
@@ -373,10 +421,18 @@ def main() -> None:
                                     and pending.session_id == session_id
                                     and pending.client_pub == client_pub
                                     and pending.cipher == requested_cipher
-                                    and pending.congestion_control == resolve_server_cc_mode(args.congestion_control, requested_cc)
+                                    and pending.congestion_control == (requested_cc or pending.congestion_control)
+                                    and pending.cleartext == (requested_cleartext or pending.cleartext)
                                 ):
                                     complete_challenge = pending
                                 else:
+                                    print(
+                                        f"[USTP-SERVER] challenge mismatch {addr[0]}:{addr[1]} "
+                                        f"pending_cc={pending.congestion_control if pending else 'none'} "
+                                        f"reply_cc={requested_cc!r} "
+                                        f"pending_cleartext={pending.cleartext if pending else 'none'} "
+                                        f"reply_cleartext={requested_cleartext!r}"
+                                    )
                                     continue
                             elif kind == "resume":
                                 _, session_id = parsed
@@ -394,7 +450,7 @@ def main() -> None:
 
                 if issue_challenge is not None:
                     with sessions_lock:
-                        send_challenge(addr, issue_challenge[0], issue_challenge[1], issue_challenge[2])
+                        send_challenge(addr, issue_challenge[0], issue_challenge[1], issue_challenge[2], issue_challenge[3])
                     continue
 
                 if complete_challenge is not None:
@@ -408,6 +464,17 @@ def main() -> None:
                     continue
 
                 if session is None:
+                    continue
+                if pkt.pkt_type == TYPE_CLOSE:
+                    with sessions_lock:
+                        current = sessions.get(addr)
+                        if current is session:
+                            try:
+                                session.sender.stop()
+                                sock.clear_peer(addr)
+                                sessions_by_id.pop(session.session_id, None)
+                            finally:
+                                sessions.pop(addr, None)
                     continue
                 if pkt.pkt_type in (TYPE_ACK, TYPE_RETRANSMIT_REQUEST, TYPE_HELLO):
                     session.sender.on_control(pkt)
