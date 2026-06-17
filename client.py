@@ -38,6 +38,10 @@ def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> b
     ).derive(shared)
 
 
+def encode_transport_hello(client_pub: bytes, cipher: str, cc_mode: str, prefix: bytes) -> bytes:
+    return prefix + client_pub + cipher.encode("ascii") + b"\0cc=" + cc_mode.encode("ascii")
+
+
 def load_tofu(path: str) -> dict[str, str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -174,6 +178,7 @@ def main() -> None:
     ap.add_argument("--reorder-buffer-ms", type=int, default=1500, help="Initial local playout buffer delay for TCP output or ordered UDP mode")
     ap.add_argument("--keepalive-interval", type=float, default=0.12)
     ap.add_argument("--cipher", default="chacha20", help="chacha20 | aes-256-gcm | aes-128-gcm")
+    ap.add_argument("--congestion-control", choices=["on", "off"], default="off", help="Request USTPS Congestion from the server")
     ap.add_argument("--tofu-file", default=os.path.expanduser("~/.ustps_known_hosts.json"))
     ap.add_argument("--regen-key", action="store_true", help="Allow replacing a stored TOFU server key after interactive confirmation")
     args = ap.parse_args()
@@ -258,11 +263,13 @@ def main() -> None:
                                 + local_session_id.encode("ascii")
                                 + b"\0"
                                 + selected_cipher.encode("ascii")
+                                + b"\0cc="
+                                + args.congestion_control.encode("ascii")
                                 + b"\0"
                                 + client_pub
                             )
                         else:
-                            hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
+                            hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, HELLO_PREFIX)
                         usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
                     except OSError as exc:
                         if is_temporary_network_error(exc):
@@ -286,15 +293,18 @@ def main() -> None:
                         continue
                     if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
                         rest = pkt.payload[len(CHALLENGE_PREFIX) :]
-                        parts = rest.split(b"\0", 3)
-                        if len(parts) != 4 or len(parts[3]) != 32:
+                        parts = rest.split(b"\0", 4)
+                        if len(parts) != 5 or len(parts[4]) != 32:
                             continue
                         token = parts[0].decode("ascii", "replace")
                         new_session_id = parts[1].decode("ascii", "replace")
                         session_cipher = parts[2].decode("ascii", "replace") or selected_cipher
-                        server_pub = parts[3]
+                        negotiated_cc = parts[3].decode("ascii", "replace") or "off"
+                        server_pub = parts[4]
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                        if negotiated_cc not in ("on", "off"):
+                            raise SystemExit(f"Server negotiated invalid congestion-control mode {negotiated_cc}")
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         reply = (
                             RESPONSE_PREFIX
@@ -303,6 +313,8 @@ def main() -> None:
                             + new_session_id.encode("ascii")
                             + b"\0"
                             + selected_cipher.encode("ascii")
+                            + b"\0cc="
+                            + args.congestion_control.encode("ascii")
                             + b"\0"
                             + client_pub
                         )
@@ -317,18 +329,22 @@ def main() -> None:
                         continue
                     if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                         rest = pkt.payload[len(SESSION_PREFIX) :]
-                        parts = rest.split(b"\0", 2)
-                        if len(parts) != 3 or len(parts[2]) != 32:
+                        parts = rest.split(b"\0", 3)
+                        if len(parts) != 4 or len(parts[3]) != 32:
                             continue
                         new_session_id = parts[0].decode("ascii", "replace")
                         session_cipher = parts[1].decode("ascii", "replace") or selected_cipher
-                        server_pub = parts[2]
+                        negotiated_cc = parts[2].decode("ascii", "replace") or "off"
+                        server_pub = parts[3]
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                        if negotiated_cc not in ("on", "off"):
+                            raise SystemExit(f"Server negotiated invalid congestion-control mode {negotiated_cc}")
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
                         usock_candidate.set_peer_psk(peer_candidate, session_key, session_cipher)
+                        print(f"[USTP-CLIENT] session ready cipher={session_cipher} cc={negotiated_cc} session={new_session_id}")
                         recv_candidate.peer = peer_candidate
                         with state_lock:
                             old_raw = raw_usock
@@ -461,11 +477,13 @@ def main() -> None:
                         + local_session_id.encode("ascii")
                         + b"\0"
                         + selected_cipher.encode("ascii")
+                        + b"\0cc="
+                        + args.congestion_control.encode("ascii")
                         + b"\0"
                         + client_pub
                     )
                 else:
-                    hello_payload = HELLO_PREFIX + client_pub + selected_cipher.encode("ascii")
+                    hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, HELLO_PREFIX)
             try:
                 local_usock.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), local_peer)
                 last_kex_ts = time.time()
@@ -532,15 +550,18 @@ def main() -> None:
             last_rx_ts = time.time()
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
                 rest = pkt.payload[len(CHALLENGE_PREFIX) :]
-                parts = rest.split(b"\0", 3)
-                if len(parts) != 4 or len(parts[3]) != 32:
+                parts = rest.split(b"\0", 4)
+                if len(parts) != 5 or len(parts[4]) != 32:
                     continue
                 token = parts[0].decode("ascii", "replace")
                 new_session_id = parts[1].decode("ascii", "replace")
                 session_cipher = parts[2].decode("ascii", "replace") or selected_cipher
-                server_pub = parts[3]
+                negotiated_cc = parts[3].decode("ascii", "replace") or "off"
+                server_pub = parts[4]
                 if session_cipher != selected_cipher:
                     raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                if negotiated_cc not in ("on", "off"):
+                    raise SystemExit(f"Server negotiated invalid congestion-control mode {negotiated_cc}")
                 check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                 reply = (
                     RESPONSE_PREFIX
@@ -549,6 +570,8 @@ def main() -> None:
                     + new_session_id.encode("ascii")
                     + b"\0"
                     + selected_cipher.encode("ascii")
+                    + b"\0cc="
+                    + args.congestion_control.encode("ascii")
                     + b"\0"
                     + client_pub
                 )
@@ -563,14 +586,17 @@ def main() -> None:
                 continue
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                 rest = pkt.payload[len(SESSION_PREFIX) :]
-                parts = rest.split(b"\0", 2)
-                if len(parts) == 3 and len(parts[2]) == 32:
+                parts = rest.split(b"\0", 3)
+                if len(parts) == 4 and len(parts[3]) == 32:
                     new_session_id = parts[0].decode("ascii", "replace")
                     session_cipher = parts[1].decode("ascii", "replace") or selected_cipher
-                    server_pub = parts[2]
+                    negotiated_cc = parts[2].decode("ascii", "replace") or "off"
+                    server_pub = parts[3]
                     with key_lock:
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
+                        if negotiated_cc not in ("on", "off"):
+                            raise SystemExit(f"Server negotiated invalid congestion-control mode {negotiated_cc}")
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
@@ -581,7 +607,7 @@ def main() -> None:
                         challenge_token = None
                         last_valid_data_ts = time.time()
                     if running:
-                        print(f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher}")
+                        print(f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher} cc={negotiated_cc}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:
                 continue

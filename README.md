@@ -4,7 +4,7 @@ USTPS means **UDP Speedy Transmission Protocol Secure**.
 
 USTP-Secure keeps USTP on UDP and adds packet-level AEAD encryption/authentication.
 
-USTPS does not implement congestion control. If the network is congested, USTPS does not try to slow itself down like TCP. It is intentionally speed-first and UDP-like in that respect.
+USTPS now supports an optional congestion controller called `USTPS Congestion`. It is still UDP-first and still keeps unordered delivery, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
 
 Status: **Beta**
 
@@ -55,7 +55,7 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
-- USTPS does **not** implement congestion control.
+- USTPS can run with optional `USTPS Congestion`, negotiated during the handshake.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
@@ -68,16 +68,53 @@ Example:
 - When packet `4` arrives later, the application can reconstruct the logical order by using `stream_pos`, not by trusting arrival order.
 
 ## Handshake and session model
-- The client starts with a plaintext transport `HELLO` carrying its X25519 public key and requested cipher.
+- The client starts with a plaintext transport `HELLO` carrying its X25519 public key, requested cipher, and requested congestion-control mode (`on` or `off`).
 - The server does not send media immediately. It first sends a plaintext challenge containing:
-  - a random token
+  - a random retry token
   - a generated Base64 `session_id`
-  - the server public key
   - the selected cipher
-- The client must answer with that same token.
+  - the negotiated congestion-control mode
+  - the server public key
+- The client must answer with that exact same token and session metadata.
 - Only after that token round-trip succeeds does the server create the AEAD session and begin sending `DATA`.
 - After validation, the session is bound to the source `IP:port` that completed the challenge.
 - `session_id` is still used as a session label, but it is not accepted from a different `IP:port`.
+
+## Retry Token
+- USTPS uses a plaintext retry-token step before any encrypted media session is accepted.
+- Flow:
+  - client sends `HELLO`
+  - server replies with `USTPS-CHALLENGE1` carrying `token`, `session_id`, selected cipher, negotiated congestion-control mode, and server public key
+  - client echoes that token back in `USTPS-CHALLENGE-REPLY1`
+  - only then does the server create the AEAD session and send `USTPS-SESSION1`
+- Purpose:
+  - prove that the sender at that source `IP:port` can actually receive packets there
+  - avoid sending encrypted media immediately to an unvalidated source address
+  - bind the final session creation to the endpoint that completed the round-trip
+- The retry token is not the session key.
+- It is only a reachability proof and handshake gate before the real USTPS session is created.
+
+## USTPS Congestion
+- `USTPS Congestion` is optional.
+- It does not change USTPS into an ordered transport and it does not add TCP-style HoL blocking.
+- It only changes how aggressively the sender injects packets into the network.
+- Negotiation model:
+  - server: `--congestion-control auto|on|off`
+  - client: `--congestion-control on|off`
+- Default behavior:
+  - server default is `auto`
+  - client default is `off`
+  - with server `auto`, the server follows what the client asked for
+  - with server `on`, congestion control is forced on even if the client asked for `off`
+  - with server `off`, congestion control is forced off even if the client asked for `on`
+- Runtime behavior:
+  - starts at a normal send rate
+  - gradually increases the effective send window and burst size while the path stays healthy
+  - watches measured `RTT`, retransmission timeout events (`RTO`), and explicit retransmit requests (`NACK`)
+  - if `RTT` inflates, `RTO` starts happening, or loss/retransmit pressure rises, it backs off
+  - once the path stabilizes again, it slowly ramps back up
+- The sender still uses selective retransmission for missing packets only.
+- `USTPS Congestion` controls rate pressure, not reliability semantics.
 
 ## Network change support
 - Automatic network/path migration has been removed from this implementation.
@@ -91,8 +128,8 @@ Example:
 - The current model is intentionally simpler: prove reachability with a challenge on the current `IP:port`, bind the session to that endpoint, and reconnect if the endpoint changes.
 
 ## Wire format
-- `ACK` is serialized like `ACK: 10 MAC:<tag>` or batched like `ACK: 10 11 12 MAC:<tag>`.
-- `RETRANSMIT_REQUEST` is serialized like `NACK: 42 MAC:<tag>`.
+- `ACK` is serialized like `ACK: 10 MAC:<tag>` or batched like `ACK: 10 11 12 ... MAC:<tag>`.
+- `RETRANSMIT_REQUEST` is serialized like `NACK: 42 MAC:<tag>` or batched like `NACK: 42 43 44 ... MAC:<tag>`.
 - `HELLO` is serialized like `HELLO: <base64-payload>`.
 - `CLOSE` is serialized like `CLOSE:`.
 - `DATA` uses the binary `UPACK` frame format instead of ASCII to avoid bloating media payload packets.
@@ -145,7 +182,7 @@ Important:
 - QUIC stream behavior:
   Inside one individual QUIC stream, ordering is still enforced. Missing data in that stream blocks later bytes for that same stream.
 - USTPS:
-  USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. It also does not attempt congestion control; when the network is congested, USTPS does not intentionally back off like TCP.
+  USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. If `USTPS Congestion` is enabled, the sender may slow or speed up, but that does not change the unordered transport model.
 
 ## Server (AEAD enabled)
 ```bash
@@ -155,7 +192,8 @@ python3 server.py \
   --bind-port 40001 \
   --video "<HLS_URL_OR_LOCAL_FILE>" \
   --stream-container mpegts \
-  --cipher chacha20
+  --cipher chacha20 \
+  --congestion-control auto
 ```
 
 The default stream container is `mpegts` because it is the most reliable option with VLC in the current TCP-local playback path.
@@ -222,7 +260,8 @@ python3 client.py \
   --output-mode tcp \
   --tcp-host 127.0.0.1 \
   --tcp-port 1238 \
-  --cipher chacha20
+  --cipher chacha20 \
+  --congestion-control off
 ```
 
 Notes:
