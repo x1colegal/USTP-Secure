@@ -60,6 +60,8 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
+- In the current implementation, `seq` is a 32-bit counter that starts at `1` for each fresh session.
+- In the current implementation, `stream_pos` is a 64-bit byte counter that starts at `0` for each fresh logical stream.
 - The receiver accepts out-of-order packets immediately instead of blocking delivery behind one missing packet.
 
 Example:
@@ -94,6 +96,37 @@ Example:
   - bind the final session creation to the endpoint that completed the round-trip
 - The retry token is not the session key.
 - It is only a reachability proof and handshake gate before the real USTPS session is created.
+- It is also not used as a nonce, not used as an ACK/NACK MAC key by itself, and not reused as packet payload state.
+
+## MTU, PMTU, and fragmentation
+- Current `UPACK` DATA payload limit: `1200` bytes.
+- `UPACK` fixed header: `20` bytes.
+- Outer `USS1` secure envelope overhead in the current implementation:
+  - `4` bytes magic
+  - `1` byte cipher id
+  - `12` bytes AEAD nonce
+  - `16` bytes AEAD tag
+- So the encrypted USTPS DATA datagram is about `1253` bytes before IP/UDP headers.
+- With IPv4 + UDP headers, that is about `1281` bytes on the wire.
+- With IPv6 + UDP headers, that is about `1301` bytes on the wire.
+- USTPS currently does **not** implement transport-level fragmentation.
+- USTPS currently does **not** implement PMTU discovery.
+- The implementation instead uses a fixed conservative payload ceiling.
+- If IP fragmentation still happens underneath and one fragment is lost, the whole UDP datagram is lost and USTPS recovers it with normal selective retransmission.
+
+## Old and duplicate packets
+- Duplicate packets inside the current session are ignored after their `seq` was already accepted.
+- Very old packets can age out of the receiver history window and then be ignored as stale.
+- Old ACK/NACK packets for data that has already been retired from the retransmission buffer are ignored.
+- A stale control packet does not recreate an already-finished packet in the sender.
+
+## Nonce behavior
+- `DATA` encryption uses a fresh random `12`-byte AEAD nonce per encrypted packet.
+- The nonce is generated randomly, not derived from `seq`.
+- Nonce reuse with the same session key is forbidden.
+- `seq` is for transport reliability.
+- `stream_pos` is for logical application ordering.
+- `nonce` is only for AEAD packet protection.
 
 ## USTPS Congestion
 - `USTPS Congestion` is optional.
