@@ -68,6 +68,7 @@ class USTPSender:
         self.lock = threading.Lock()
         self.running = False
         self.wakeup = threading.Event()
+        self.cc_wakeup = threading.Event()
         self.stats_acks = 0
         self.stats_rto = 0
         self.nack_ts: Dict[int, float] = {}
@@ -89,6 +90,7 @@ class USTPSender:
     def stop(self) -> None:
         self.running = False
         self.wakeup.set()
+        self.cc_wakeup.set()
 
     def reset_session(self) -> None:
         with self.lock:
@@ -116,6 +118,7 @@ class USTPSender:
         with self.lock:
             self.pending.append((payload, stream_pos))
         self.wakeup.set()
+        self.cc_wakeup.set()
 
     def _send_control(self, raw: bytes) -> None:
         try:
@@ -219,6 +222,7 @@ class USTPSender:
                     self.last_progress_ts = now
             if removed:
                 self.wakeup.set()
+                self.cc_wakeup.set()
             return
 
         if pkt.pkt_type == TYPE_RETRANSMIT_REQUEST:
@@ -243,6 +247,7 @@ class USTPSender:
                     self.stats_nack += queued
                     print(f"[USTP-SENDER] peer requested retransmit count={queued}")
             self.wakeup.set()
+            self.cc_wakeup.set()
 
     def _update_rto(self, sample: float) -> None:
         sample = max(0.005, min(10.0, sample))
@@ -255,6 +260,7 @@ class USTPSender:
             self.rttvar = (1.0 - beta) * self.rttvar + beta * abs(self.srtt - sample)
             self.srtt = (1.0 - alpha) * self.srtt + alpha * sample
         self.rto = max(0.05, min(3.0, self.srtt + 4.0 * self.rttvar))
+        self.cc_wakeup.set()
 
 
     def _effective_window_locked(self) -> int:
@@ -283,14 +289,22 @@ class USTPSender:
         if self.cc_burst >= self.max_burst * 0.9:
             self.cc_stable_burst_floor = min(float(self.max_burst), max(self.cc_stable_burst_floor, self.cc_burst * 0.75))
 
+    def _cc_wait_timeout_locked(self) -> float:
+        srtt = self.srtt or 0.0
+        if srtt > 0.0:
+            return max(0.005, min(0.05, srtt / 8.0))
+        return 0.02
+
     def _cc_loop(self) -> None:
         while self.running:
-            time.sleep(0.25)
+            with self.lock:
+                wait_timeout = self._cc_wait_timeout_locked()
+            self.cc_wakeup.wait(wait_timeout)
+            self.cc_wakeup.clear()
             with self.lock:
                 if not self.congestion_control:
                     continue
                 now = time.time()
-                dt = max(0.001, now - self.cc_last_sample_ts)
                 ack_delta = self.stats_acks - self.cc_last_acks
                 rto_delta = self.stats_rto - self.cc_last_rto
                 nack_delta = self.stats_nack - self.cc_last_nack
@@ -346,6 +360,7 @@ class USTPSender:
                     self.stats_rto += len(timed_out)
                 print(f"[USTP-SENDER] RTO queued {len(timed_out)}")
                 self.wakeup.set()
+                self.cc_wakeup.set()
             time.sleep(0.03)
 
     def get_stats(self) -> Dict[str, float]:
