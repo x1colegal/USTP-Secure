@@ -521,10 +521,8 @@ def main() -> None:
                 time.sleep(args.keepalive_interval)
                 continue
             with key_lock:
-                secure_probe = False
                 if local_session_ready and local_session_id:
                     hello_payload = RTT_PROBE_PREFIX + struct.pack("!Q", time.monotonic_ns())
-                    secure_probe = True
                 elif local_challenge_token and local_session_id:
                     hello_payload = (
                         RESPONSE_PREFIX
@@ -544,10 +542,7 @@ def main() -> None:
                     hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext, HELLO_PREFIX)
             try:
                 raw_hello = mkp(TYPE_HELLO, payload=hello_payload).to_bytes()
-                if secure_probe:
-                    local_usock.sendto(raw_hello, local_peer)
-                else:
-                    local_usock.send_plain(raw_hello, local_peer)
+                local_usock.send_plain(raw_hello, local_peer)
                 last_kex_ts = time.time()
             except OSError as exc:
                 if not is_temporary_network_error(exc):

@@ -386,7 +386,7 @@ def main() -> None:
                             if session is not None and len(probe) == 8:
                                 session.last_hello_ts = now
                                 session.last_seen_ts = now
-                                sock.sendto(mkp(TYPE_HELLO, payload=RTT_PROBE_PREFIX + probe).to_bytes(), addr)
+                                sock.send_plain(mkp(TYPE_HELLO, payload=RTT_PROBE_PREFIX + probe).to_bytes(), addr)
                             continue
                         parsed = parse_client_hello(pkt.payload)
                         if parsed is not None:
