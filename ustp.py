@@ -438,15 +438,19 @@ class USTPReceiver:
         seq = pkt.seq
         pos = pkt.stream_pos
 
-        # ACK in small batches to reduce control overhead.
-        if seq not in self.received_seq:
+        is_new = seq not in self.received_seq
+
+        # ACK new packets in batches. A duplicate must be ACKed again immediately:
+        # its previous ACK was probably lost, which caused the retransmission.
+        if is_new:
             self.received_seq.add(seq)
-            if seq not in self.pending_ack_set:
-                self.pending_ack.append(seq)
-                self.pending_ack_set.add(seq)
-            now = time.time()
-            if len(self.pending_ack) >= ACK_BATCH_MAX or (now - self.last_ack_flush_ts) >= ACK_FLUSH_INTERVAL:
-                self.flush_acks(now)
+            self.nack_ts.pop(seq, None)
+        if seq not in self.pending_ack_set:
+            self.pending_ack.append(seq)
+            self.pending_ack_set.add(seq)
+        now = time.time()
+        if not is_new or len(self.pending_ack) >= ACK_BATCH_MAX or (now - self.last_ack_flush_ts) >= ACK_FLUSH_INTERVAL:
+            self.flush_acks(now)
 
         if seq in self.seq_to_pos:
             return b""

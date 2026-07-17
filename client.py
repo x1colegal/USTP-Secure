@@ -684,12 +684,14 @@ def main() -> None:
             with state_lock:
                 local_recv = recv
             if local_recv is not None:
-                if pkt.seq in local_recv.received_seq:
+                is_duplicate = pkt.seq in local_recv.received_seq
+                was_requested = pkt.seq in local_recv.nack_ts
+                if is_duplicate:
                     print(f"[USTP-CLIENT] DUPLICATE seq={pkt.seq}: packet already received; discarded")
                     local_recv.handle_data(pkt)
                     continue
                 expected_seq = local_recv.last_max_seq + 1 if local_recv.last_max_seq else pkt.seq
-                if pkt.seq != expected_seq:
+                if pkt.seq != expected_seq and not was_requested:
                     print(
                         f"[USTP-CLIENT] UNORD seq={pkt.seq} expected={expected_seq}: "
                         "packet received out of order; no retransmission needed for this packet"
