@@ -19,15 +19,10 @@ USTPS can be used for many kinds of applications and transports.
 This repository, however, is focused specifically on **streaming over USTPS**.
 
 ## News
-- `09/07/2026: USTP/2 Beta Released!`
-  Changelogs:
-  - Added optional `USTP/2 Beta` negotiation on top of the stable `USTP/1.1` transport.
-  - Added split client sockets for `DATA` vs control traffic.
-  - `UPAK` media packets can now arrive on a dedicated client UDP port while `ACK`, `NACK`, `HELLO`, and `CLOSE` stay on the control socket.
-  - The server stays on `udp/40001`; only the client opens the second socket.
-  - New client flag: `--ustp2beta on`.
-  - Server policy flag: `--ustp2beta auto|on|off`.
-  - If the server does not support the option, clients automatically stay on stable `USTP/1.1`.
+- `16/07/2026: USTP/2 Beta discontinued.`
+  - USTP/2 Beta was removed because its split DATA/control paths were substantially less stable than USTP/1.1.
+  - Observed problems included control-path starvation, false RTO bursts, inconsistent recovery and sessions that negotiated successfully but stopped delivering DATA.
+  - USTPS now supports only the stable USTP/1.1 transport.
 
 ## Build note
 - Built with `Codex` using `GPT-5.4 (Low)`.
@@ -87,7 +82,6 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
 - Stable transport generation is `USTP/1.1`.
-- `USTP/2 Beta` is an optional experimental mode layered on the same session model.
 - USTPS can run with optional `USTPS Congestion`, negotiated during the handshake.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
@@ -104,42 +98,17 @@ Example:
 
 ## Handshake and session model
 - The client starts with a plaintext transport `HELLO` carrying its X25519 public key, requested cipher, requested congestion-control mode (`on` or `off`), and requested `DATA` protection mode (`cleartext on|off`).
-- The same `HELLO` can also request `USTP/2 Beta` with `u2=on`.
 - The server does not send media immediately. It first sends a plaintext challenge containing:
   - a random retry token
   - a generated Base64 `session_id`
   - the selected cipher
   - the negotiated congestion-control mode
   - the negotiated `DATA` protection mode
-  - the negotiated `USTP/2 Beta` mode
   - the server public key
 - The client must answer with that exact same token and session metadata.
 - Only after that token round-trip succeeds does the server create the session and begin sending `DATA`.
 - After validation, the session is bound to the source `IP:port` that completed the challenge.
 - `session_id` is still used as a session label, but it is not accepted from a different `IP:port`.
-
-## USTP/2 Beta
-- `USTP/2 Beta` is the beta successor to stable `USTP/1.1`.
-- It is currently available only in this `USTP-Secure` implementation.
-- It can be requested from the client with:
-  - `--ustp2beta on`
-- Server policy:
-  - `--ustp2beta auto|on|off`
-  - default: `auto`
-- Negotiation rules:
-  - client `on` + server `on` or `auto` = `USTP/2 Beta` enabled
-  - client `on` + server `off` = handshake error
-  - client `off` = stable `USTP/1.1`
-  - if an older server does not know this option, the client falls back to stable `USTP/1.1`
-- Wire behavior:
-  - the server still listens only on `udp/40001`
-  - the client opens one UDP socket for control traffic
-  - the client opens a second UDP socket for `DATA`
-  - `UPAK` packets go to the data socket
-  - `ACK`, `NACK`, `HELLO`, and `CLOSE` stay on the control socket
-- Goal:
-  - reduce interference between large media bursts and small transport-control packets on the client side
-  - keep the stable `USTP/1.1` path available when the beta mode is not requested
 
 ## Retry Token
 - USTPS uses a plaintext retry-token step before any encrypted media session is accepted.
@@ -292,8 +261,7 @@ python3 server.py \
   --stream-container mpegts \
   --cipher chacha20 \
   --congestion-control auto \
-  --cleartext auto \
-  --ustp2beta auto
+  --cleartext auto
 ```
 
 The default stream container is `mpegts` because it is the most reliable option with VLC in the current TCP-local playback path.
@@ -305,11 +273,8 @@ python3 client.py \
   --peer-port 40001 \
   --cipher chacha20 \
   --congestion-control off \
-  --cleartext off \
-  --ustp2beta on
+  --cleartext off
 ```
-
-- Omit `--ustp2beta on` to stay on stable `USTP/1.1`.
 
 You can change the FFmpeg muxer/container with `--stream-container`.
 
