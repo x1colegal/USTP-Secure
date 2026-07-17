@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import socket
+import struct
 import threading
 import time
 
@@ -22,6 +23,7 @@ CHALLENGE_PREFIX = b"USTPS-CHALLENGE1\0"
 RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1\0"
 RESUME_PREFIX = b"USTPS-RESUME1\0"
 SESSION_PREFIX = b"USTPS-SESSION1\0"
+RTT_PROBE_PREFIX = b"USTPS-RTT1\0"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 
 
@@ -251,6 +253,7 @@ def main() -> None:
     ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
     reorder_lock = threading.Lock()
     last_gap_log = 0.0
+    last_rtt_log_ts = 0.0
 
     def reset_local_stream_state(reason: str) -> None:
         nonlocal out_by_pos, next_out_pos, ordered_release_at, last_gap_log, stream_resync_needed
@@ -518,8 +521,10 @@ def main() -> None:
                 time.sleep(args.keepalive_interval)
                 continue
             with key_lock:
+                secure_probe = False
                 if local_session_ready and local_session_id:
-                    hello_payload = RESUME_PREFIX + local_session_id.encode("ascii")
+                    hello_payload = RTT_PROBE_PREFIX + struct.pack("!Q", time.monotonic_ns())
+                    secure_probe = True
                 elif local_challenge_token and local_session_id:
                     hello_payload = (
                         RESPONSE_PREFIX
@@ -538,7 +543,11 @@ def main() -> None:
                 else:
                     hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext, HELLO_PREFIX)
             try:
-                local_usock.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), local_peer)
+                raw_hello = mkp(TYPE_HELLO, payload=hello_payload).to_bytes()
+                if secure_probe:
+                    local_usock.sendto(raw_hello, local_peer)
+                else:
+                    local_usock.send_plain(raw_hello, local_peer)
                 last_kex_ts = time.time()
             except OSError as exc:
                 if not is_temporary_network_error(exc):
@@ -564,6 +573,7 @@ def main() -> None:
     def recv_loop() -> None:
         nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, ordered_release_at, stream_resync_needed
         nonlocal session_ready, session_id, challenge_token
+        nonlocal last_rtt_log_ts
         nonlocal running
         local_epoch = -1
         while running:
@@ -642,6 +652,24 @@ def main() -> None:
                     raise
                 challenge_token = token
                 session_id = new_session_id
+                continue
+            if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(RTT_PROBE_PREFIX):
+                echoed = pkt.payload[len(RTT_PROBE_PREFIX) :]
+                if len(echoed) == 8:
+                    sent_ns = struct.unpack("!Q", echoed)[0]
+                    sample = (time.monotonic_ns() - sent_ns) / 1_000_000_000.0
+                    if 0.0 < sample <= 3.0:
+                        with state_lock:
+                            local_recv = recv
+                        if local_recv is not None:
+                            local_recv.observe_rtt(sample)
+                            now_mono = time.monotonic()
+                            if running and now_mono - last_rtt_log_ts >= 1.0:
+                                print(
+                                    f"[USTP-CLIENT] HELLO RTT={local_recv.path_srtt * 1000.0:.1f}ms "
+                                    f"reorder_grace={local_recv.reorder_grace * 1000.0:.1f}ms"
+                                )
+                                last_rtt_log_ts = now_mono
                 continue
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
                 rest = pkt.payload[len(SESSION_PREFIX) :]

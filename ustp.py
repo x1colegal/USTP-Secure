@@ -21,6 +21,7 @@ class SentItem:
     last_sent: float
     first_sent: float
     retransmitted: bool = False
+    rto_backoff: int = 0
 
 
 class USTPSender:
@@ -38,7 +39,9 @@ class USTPSender:
         self.sock = sock
         self.peer = peer
         self.window = window
-        self.rto = rto
+        self.initial_rto = max(0.02, rto)
+        self.min_rto = 0.02
+        self.rto = self.initial_rto
         self.loss_percent = max(0, min(100, loss_percent))
         self.max_burst = max(32, max_burst)
         self.pump_interval = max(0.0005, pump_interval)
@@ -50,7 +53,7 @@ class USTPSender:
         self.cc_min_srtt: float | None = None
         self.cc_stable_window_floor = float(max(32, min(self.window, int(self.window * 0.6))))
         self.cc_stable_burst_floor = float(max(32, min(self.max_burst, int(self.max_burst * 0.6))))
-        self.cc_last_sample_ts = time.time()
+        self.cc_last_sample_ts = time.monotonic()
         self.cc_last_acks = 0
         self.cc_last_rto = 0
         self.cc_last_nack = 0
@@ -72,7 +75,7 @@ class USTPSender:
         self.stats_acks = 0
         self.stats_rto = 0
         self.nack_ts: Dict[int, float] = {}
-        now = time.time()
+        now = time.monotonic()
         self.last_ack_ts = now
         self.last_send_ts = now
         self.last_progress_ts = now
@@ -163,7 +166,7 @@ class USTPSender:
                     if not it:
                         continue
                     raw = it.raw
-                    now = time.time()
+                    now = time.monotonic()
                     it.last_sent = now
                     it.retransmitted = True
                 elif self.pending:
@@ -177,13 +180,13 @@ class USTPSender:
                         sp = ext_stream_pos
                     pkt = mkp(TYPE_DATA, seq=seq, stream_pos=sp, payload=payload)
                     raw = pkt.to_bytes()
-                    now = time.time()
+                    now = time.monotonic()
                     self.sent[seq] = SentItem(pkt=pkt, raw=raw, last_sent=now, first_sent=now)
                 else:
                     return
 
             self._send_raw(raw)
-            now = time.time()
+            now = time.monotonic()
             with self.lock:
                 self.last_send_ts = now
             burst += 1
@@ -207,7 +210,7 @@ class USTPSender:
                     item = self.sent.pop(seq, None)
                     if item is not None:
                         if not item.retransmitted:
-                            sample = time.time() - item.first_sent
+                            sample = time.monotonic() - item.first_sent
                             self._update_rto(sample)
                         removed = True
                         self.stats_acks += 1
@@ -217,7 +220,7 @@ class USTPSender:
                     else:
                         self.cc_min_srtt = min(self.cc_min_srtt, self.srtt)
                 if removed:
-                    now = time.time()
+                    now = time.monotonic()
                     self.last_ack_ts = now
                     self.last_progress_ts = now
             if removed:
@@ -232,7 +235,7 @@ class USTPSender:
                 if extra:
                     missing_items.extend(struct.unpack(f"!{extra}I", pkt.payload[: extra * 4]))
             with self.lock:
-                now = time.time()
+                now = time.monotonic()
                 queued = 0
                 for missing in missing_items:
                     last = self.nack_ts.get(missing, 0.0)
@@ -259,7 +262,8 @@ class USTPSender:
             beta = 1.0 / 4.0
             self.rttvar = (1.0 - beta) * self.rttvar + beta * abs(self.srtt - sample)
             self.srtt = (1.0 - alpha) * self.srtt + alpha * sample
-        self.rto = max(0.05, min(3.0, self.srtt + 4.0 * self.rttvar))
+        variation = max(4.0 * self.rttvar, ACK_FLUSH_INTERVAL * 2.0, self.srtt * 0.5)
+        self.rto = max(self.min_rto, min(3.0, self.srtt + variation))
         self.cc_wakeup.set()
 
 
@@ -304,7 +308,7 @@ class USTPSender:
             with self.lock:
                 if not self.congestion_control:
                     continue
-                now = time.time()
+                now = time.monotonic()
                 ack_delta = self.stats_acks - self.cc_last_acks
                 rto_delta = self.stats_rto - self.cc_last_rto
                 nack_delta = self.stats_nack - self.cc_last_nack
@@ -346,19 +350,24 @@ class USTPSender:
 
     def _retx_loop(self) -> None:
         while self.running:
-            now = time.time()
+            now = time.monotonic()
             timed_out = []
             with self.lock:
                 for seq, it in self.sent.items():
-                    if now - it.last_sent >= self.rto and seq not in self.retx_set:
+                    timeout = min(3.0, self.rto * (2 ** min(it.rto_backoff, 4)))
+                    if now - it.last_sent >= timeout and seq not in self.retx_set:
                         timed_out.append(seq)
                 for seq in timed_out:
+                    self.sent[seq].rto_backoff += 1
                     self.retx_set.add(seq)
                     self.retx_queue.append(seq)
             if timed_out:
                 with self.lock:
                     self.stats_rto += len(timed_out)
-                print(f"[USTP-SENDER] RTO queued {len(timed_out)}")
+                print(
+                    f"[USTP-SENDER] RTO queued {len(timed_out)} "
+                    f"rto={self.rto * 1000.0:.1f}ms srtt={(self.srtt or 0.0) * 1000.0:.1f}ms"
+                )
                 self.wakeup.set()
                 self.cc_wakeup.set()
             time.sleep(0.03)
@@ -371,9 +380,9 @@ class USTPSender:
                 "rto_events": float(self.stats_rto),
                 "inflight": float(len(self.sent)),
                 "pending": float(len(self.pending)),
-                "last_ack_age": max(0.0, time.time() - self.last_ack_ts),
-                "last_send_age": max(0.0, time.time() - self.last_send_ts),
-                "last_progress_age": max(0.0, time.time() - self.last_progress_ts),
+                "last_ack_age": max(0.0, time.monotonic() - self.last_ack_ts),
+                "last_send_age": max(0.0, time.monotonic() - self.last_send_ts),
+                "last_progress_age": max(0.0, time.monotonic() - self.last_progress_ts),
                 "rto": float(self.rto),
                 "srtt": float(self.srtt or 0.0),
                 "cc_enabled": 1.0 if self.congestion_control else 0.0,
@@ -395,12 +404,16 @@ class USTPReceiver:
         self.received_seq: Set[int] = set()
         self.pending_ack: list[int] = []
         self.pending_ack_set: Set[int] = set()
-        self.last_ack_flush_ts = time.time()
+        self.last_ack_flush_ts = time.monotonic()
         self.nack_ts: Dict[int, float] = {}
+        self.missing_first_seen: Dict[int, float] = {}
         self.last_data_ts = 0.0
         self.data_count = 0
         self.last_max_seq = 0
         self.idle_clear_after = 8.0
+        self.reorder_grace = 0.025
+        self.path_srtt: float | None = None
+        self.path_rttvar: float | None = None
         self.cleanup_every = 128
         self.seq_history_limit = 4096
         self.pos_history_limit = MAX_PAYLOAD * 4096
@@ -413,11 +426,22 @@ class USTPReceiver:
         self.received_seq.clear()
         self.pending_ack.clear()
         self.pending_ack_set.clear()
-        self.last_ack_flush_ts = time.time()
+        self.last_ack_flush_ts = time.monotonic()
         self.nack_ts.clear()
+        self.missing_first_seen.clear()
         self.last_data_ts = 0.0
         self.data_count = 0
         self.last_max_seq = 0
+
+    def observe_rtt(self, sample: float) -> None:
+        sample = max(0.001, min(3.0, sample))
+        if self.path_srtt is None or self.path_rttvar is None:
+            self.path_srtt = sample
+            self.path_rttvar = sample / 4.0
+        else:
+            self.path_rttvar = 0.75 * self.path_rttvar + 0.25 * abs(self.path_srtt - sample)
+            self.path_srtt = 0.875 * self.path_srtt + 0.125 * sample
+        self.reorder_grace = max(0.003, min(0.25, self.path_srtt * 0.20 + self.path_rttvar))
 
     def _trim_state(self) -> None:
         if len(self.received_seq) > self.seq_history_limit:
@@ -427,6 +451,7 @@ class USTPReceiver:
                 self.received_seq.discard(seq)
                 self.seq_to_pos.pop(seq, None)
                 self.nack_ts.pop(seq, None)
+                self.missing_first_seen.pop(seq, None)
 
         stale_pos_cutoff = max(0, self.next_pos - self.pos_history_limit)
         if self.buffer_by_pos:
@@ -445,10 +470,11 @@ class USTPReceiver:
         if is_new:
             self.received_seq.add(seq)
             self.nack_ts.pop(seq, None)
+            self.missing_first_seen.pop(seq, None)
         if seq not in self.pending_ack_set:
             self.pending_ack.append(seq)
             self.pending_ack_set.add(seq)
-        now = time.time()
+        now = time.monotonic()
         if not is_new or len(self.pending_ack) >= ACK_BATCH_MAX or (now - self.last_ack_flush_ts) >= ACK_FLUSH_INTERVAL:
             self.flush_acks(now)
 
@@ -457,7 +483,7 @@ class USTPReceiver:
 
         self.seq_to_pos[seq] = pos
         self.buffer_by_pos[pos] = pkt.payload
-        self.last_data_ts = time.time()
+        self.last_data_ts = time.monotonic()
         self.data_count += 1
         if seq > self.last_max_seq:
             self.last_max_seq = seq
@@ -481,7 +507,7 @@ class USTPReceiver:
         if not self.pending_ack:
             return
         if now is None:
-            now = time.time()
+            now = time.monotonic()
         seqs = self.pending_ack[:ACK_BATCH_MAX]
         del self.pending_ack[: len(seqs)]
         for seq in seqs:
@@ -506,11 +532,12 @@ class USTPReceiver:
         # Warm-up guard: avoid early false-positive NACK storms.
         if self.data_count < 12:
             return
-        now = time.time()
+        now = time.monotonic()
         # Do not spam NACK when stream is idle/restarting.
         if self.last_data_ts and (now - self.last_data_ts) > self.idle_clear_after:
             self.received_seq.clear()
             self.nack_ts.clear()
+            self.missing_first_seen.clear()
             self.seq_to_pos.clear()
             self.buffer_by_pos.clear()
             return
@@ -524,6 +551,10 @@ class USTPReceiver:
         missing_batch = []
         for s in range(mn, mx):
             if s in self.received_seq:
+                self.missing_first_seen.pop(s, None)
+                continue
+            first_seen = self.missing_first_seen.setdefault(s, now)
+            if now - first_seen < self.reorder_grace:
                 continue
             last = self.nack_ts.get(s, 0.0)
             if now - last < 0.5:
