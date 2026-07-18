@@ -19,10 +19,10 @@ USTPS can be used for many kinds of applications and transports.
 This repository, however, is focused specifically on **streaming over USTPS**.
 
 ## News
-- `16/07/2026: USTP/2 Beta discontinued.`
-  - USTP/2 Beta was removed because its split DATA/control paths were substantially less stable than USTP/1.1.
-  - Observed problems included control-path starvation, false RTO bursts, inconsistent recovery and sessions that negotiated successfully but stopped delivering DATA.
-  - USTPS now supports only the stable USTP/1.1 transport.
+- `2026-07-18`: USTP/2 Beta was removed from the current tree.
+  - Real-world behavior was less stable than USTP/1.1 under loss.
+  - The current stable transport path is USTP/1.1 only.
+  - The transport handshake now uses plaintext ASCII records.
 
 ## Build note
 - Built with `Codex` using `GPT-5.4 (Low)`.
@@ -81,7 +81,6 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 
 ## Transport model
 - USTPS is reliable over UDP, but it is **unordered by design**.
-- Stable transport generation is `USTP/1.1`.
 - USTPS can run with optional `USTPS Congestion`, negotiated during the handshake.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
@@ -265,16 +264,6 @@ python3 server.py \
 ```
 
 The default stream container is `mpegts` because it is the most reliable option with VLC in the current TCP-local playback path.
-
-## Client
-```bash
-python3 client.py \
-  --peer-ip "<SERVER_IP_OR_DOMAIN>" \
-  --peer-port 40001 \
-  --cipher chacha20 \
-  --congestion-control off \
-  --cleartext off
-```
 
 You can change the FFmpeg muxer/container with `--stream-container`.
 

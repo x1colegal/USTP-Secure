@@ -19,12 +19,11 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from packet import MAX_PAYLOAD, TYPE_ACK, TYPE_CLOSE, TYPE_HELLO, TYPE_RETRANSMIT_REQUEST, mkp
 from ustp import USTPSender, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
-HELLO_PREFIX = b"USTPS-KEX1\0"
-CHALLENGE_PREFIX = b"USTPS-CHALLENGE1\0"
-RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1\0"
-RESUME_PREFIX = b"USTPS-RESUME1\0"
-SESSION_PREFIX = b"USTPS-SESSION1\0"
-RTT_PROBE_PREFIX = b"USTPS-RTT1\0"
+HELLO_PREFIX = b"USTPS-KEX1 "
+CHALLENGE_PREFIX = b"USTPS-CHALLENGE1 "
+RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1 "
+RESUME_PREFIX = b"USTPS-RESUME1 "
+SESSION_PREFIX = b"USTPS-SESSION1 "
 VIDEO_USER_AGENT = "USTPS Video Mode"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 
@@ -75,33 +74,32 @@ def b64u(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def parse_hello_options(raw: bytes) -> tuple[str | None, str | None, str | None]:
-    if not raw:
-        return None, None, None
+def b64u_decode(text: str) -> bytes:
+    padded = text + ("=" * (-len(text) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def encode_ascii_record(prefix: bytes, **fields: str) -> bytes:
+    parts = [prefix.rstrip()]
+    for key, value in fields.items():
+        parts.append(f"{key}={value}".encode("ascii"))
+    return b" ".join(parts)
+
+
+def parse_ascii_record(payload: bytes, prefix: bytes) -> dict[str, str] | None:
+    if not payload.startswith(prefix):
+        return None
     try:
-        text = raw.decode("ascii", "replace")
+        text = payload[len(prefix) :].decode("ascii")
     except Exception:
-        return None, None, None
-    parts = text.split("\0")
-    cipher_text = parts[0] if parts else ""
-    cipher = None
-    if cipher_text:
-        try:
-            cipher = normalize_cipher_name(cipher_text)
-        except Exception:
-            cipher = None
-    cc_mode = None
-    cleartext_mode = None
-    for part in parts[1:]:
-        if part.startswith("cc="):
-            value = part[3:].strip().lower()
-            if value in {"on", "off"}:
-                cc_mode = value
-        elif part.startswith("ct="):
-            value = part[3:].strip().lower()
-            if value in {"on", "off"}:
-                cleartext_mode = value
-    return cipher, cc_mode, cleartext_mode
+        return None
+    out: dict[str, str] = {}
+    for token in text.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        out[key] = value
+    return out
 
 
 def resolve_server_cc_mode(server_mode: str, client_mode: str | None) -> str:
@@ -121,37 +119,31 @@ def resolve_server_cleartext_mode(server_mode: str, client_mode: str | None) -> 
 
 
 def parse_client_hello(payload: bytes):
-    if payload.startswith(HELLO_PREFIX):
-        rest = payload[len(HELLO_PREFIX) :]
-        if len(rest) < 32:
+    fields = parse_ascii_record(payload, HELLO_PREFIX)
+    if fields is not None:
+        try:
+            client_pub = b64u_decode(fields["pub"])
+        except Exception:
             return None
-        client_pub = rest[:32]
-        cipher = None
-        congestion_control = None
-        cleartext = None
-        if len(rest) > 32:
-            cipher, congestion_control, cleartext = parse_hello_options(rest[32:])
+        cipher = normalize_cipher_name(fields.get("cipher", "chacha20"))
+        congestion_control = fields.get("cc")
+        cleartext = fields.get("ct")
         return ("init", client_pub, cipher, congestion_control, cleartext)
-    if payload.startswith(RESPONSE_PREFIX):
-        rest = payload[len(RESPONSE_PREFIX) :]
-        parts = rest.split(b"\0", 5)
-        if len(parts) != 6 or len(parts[5]) != 32:
-            return None
+    fields = parse_ascii_record(payload, RESPONSE_PREFIX)
+    if fields is not None:
         try:
-            token = parts[0].decode("ascii", "replace")
-            session_id = parts[1].decode("ascii", "replace")
-            cipher, congestion_control, cleartext = parse_hello_options(parts[2] + b"\0" + parts[3] + b"\0" + parts[4])
-            if cipher is None:
-                return None
+            token = fields["token"]
+            session_id = fields["session"]
+            client_pub = b64u_decode(fields["pub"])
+            cipher = normalize_cipher_name(fields["cipher"])
         except Exception:
             return None
-        return ("challenge_reply", token, session_id, parts[5], cipher, congestion_control, cleartext)
-    if payload.startswith(RESUME_PREFIX):
-        rest = payload[len(RESUME_PREFIX) :]
-        try:
-            return ("resume", rest.decode("ascii", "replace"))
-        except Exception:
-            return None
+        congestion_control = fields.get("cc")
+        cleartext = fields.get("ct")
+        return ("challenge_reply", token, session_id, client_pub, cipher, congestion_control, cleartext)
+    fields = parse_ascii_record(payload, RESUME_PREFIX)
+    if fields is not None:
+        return ("resume", fields.get("session", ""))
     return None
 
 
@@ -309,23 +301,27 @@ def main() -> None:
                 created_ts=time.time(),
             )
             pending_challenges[addr] = challenge
-        payload = CHALLENGE_PREFIX + challenge.token.encode("ascii") + b"\0" + challenge.session_id.encode("ascii") + b"\0" + challenge.cipher.encode("ascii") + b"\0cc=" + challenge.congestion_control.encode("ascii") + b"\0ct=" + challenge.cleartext.encode("ascii") + b"\0" + host_public
+        payload = encode_ascii_record(
+            CHALLENGE_PREFIX,
+            token=challenge.token,
+            session=challenge.session_id,
+            cipher=challenge.cipher,
+            cc=challenge.congestion_control,
+            ct=challenge.cleartext,
+            pub=b64u(host_public),
+        )
         sock.send_plain(mkp(TYPE_HELLO, payload=payload).to_bytes(), addr)
 
     def new_session(addr: tuple[str, int], challenge: PendingChallenge) -> ClientSession:
         client_pub = x25519.X25519PublicKey.from_public_bytes(challenge.client_pub)
         session_psk = derive_session_key(host_private.exchange(client_pub), challenge.client_pub, host_public)
-        session_reply = (
-            SESSION_PREFIX
-            + challenge.session_id.encode("ascii")
-            + b"\0"
-            + challenge.cipher.encode("ascii")
-            + b"\0cc="
-            + challenge.congestion_control.encode("ascii")
-            + b"\0ct="
-            + challenge.cleartext.encode("ascii")
-            + b"\0"
-            + host_public
+        session_reply = encode_ascii_record(
+            SESSION_PREFIX,
+            session=challenge.session_id,
+            cipher=challenge.cipher,
+            cc=challenge.congestion_control,
+            ct=challenge.cleartext,
+            pub=b64u(host_public),
         )
         sock.send_plain(mkp(TYPE_HELLO, payload=session_reply).to_bytes(), addr)
         sock.set_peer_psk(addr, session_psk, challenge.cipher, cleartext=(challenge.cleartext == "on"))
@@ -381,13 +377,6 @@ def main() -> None:
                 with sessions_lock:
                     session = sessions.get(addr)
                     if pkt.pkt_type == TYPE_HELLO:
-                        if pkt.payload.startswith(RTT_PROBE_PREFIX):
-                            probe = pkt.payload[len(RTT_PROBE_PREFIX) :]
-                            if session is not None and len(probe) == 8:
-                                session.last_hello_ts = now
-                                session.last_seen_ts = now
-                                sock.send_plain(mkp(TYPE_HELLO, payload=RTT_PROBE_PREFIX + probe).to_bytes(), addr)
-                            continue
                         parsed = parse_client_hello(pkt.payload)
                         if parsed is not None:
                             kind = parsed[0]

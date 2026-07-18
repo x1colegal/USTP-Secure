@@ -1,10 +1,10 @@
 import argparse
+import base64
 import errno
 import ipaddress
 import json
 import os
 import socket
-import struct
 import threading
 import time
 
@@ -18,12 +18,11 @@ from ustp import USTPReceiver, parse_packet
 from aead_udp import AEADDatagramSocket, normalize_cipher_name
 
 
-HELLO_PREFIX = b"USTPS-KEX1\0"
-CHALLENGE_PREFIX = b"USTPS-CHALLENGE1\0"
-RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1\0"
-RESUME_PREFIX = b"USTPS-RESUME1\0"
-SESSION_PREFIX = b"USTPS-SESSION1\0"
-RTT_PROBE_PREFIX = b"USTPS-RTT1\0"
+HELLO_PREFIX = b"USTPS-KEX1 "
+CHALLENGE_PREFIX = b"USTPS-CHALLENGE1 "
+RESPONSE_PREFIX = b"USTPS-CHALLENGE-REPLY1 "
+RESUME_PREFIX = b"USTPS-RESUME1 "
+SESSION_PREFIX = b"USTPS-SESSION1 "
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 
 
@@ -40,45 +39,46 @@ def derive_session_key(shared: bytes, client_pub: bytes, server_pub: bytes) -> b
     ).derive(shared)
 
 
-def encode_transport_hello(client_pub: bytes, cipher: str, cc_mode: str, cleartext_mode: str, prefix: bytes) -> bytes:
-    return (
-        prefix
-        + client_pub
-        + cipher.encode("ascii")
-        + b"\0cc="
-        + cc_mode.encode("ascii")
-        + b"\0ct="
-        + cleartext_mode.encode("ascii")
-    )
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def parse_hello_options(raw: bytes) -> tuple[str | None, str | None, str | None]:
-    if not raw:
-        return None, None, None
+def b64u_decode(text: str) -> bytes:
+    padded = text + ("=" * (-len(text) % 4))
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def encode_ascii_record(prefix: bytes, **fields: str) -> bytes:
+    parts = [prefix.rstrip()]
+    for key, value in fields.items():
+        parts.append(f"{key}={value}".encode("ascii"))
+    return b" ".join(parts)
+
+
+def parse_ascii_record(payload: bytes, prefix: bytes) -> dict[str, str] | None:
+    if not payload.startswith(prefix):
+        return None
     try:
-        text = raw.decode("ascii", "replace")
+        text = payload[len(prefix) :].decode("ascii")
     except Exception:
-        return None, None, None
-    parts = text.split("\0")
-    cipher_text = parts[0] if parts else ""
-    cipher = None
-    if cipher_text:
-        try:
-            cipher = normalize_cipher_name(cipher_text)
-        except Exception:
-            cipher = None
-    cc_mode = None
-    cleartext_mode = None
-    for part in parts[1:]:
-        if part.startswith("cc="):
-            value = part[3:].strip().lower()
-            if value in {"on", "off"}:
-                cc_mode = value
-        elif part.startswith("ct="):
-            value = part[3:].strip().lower()
-            if value in {"on", "off"}:
-                cleartext_mode = value
-    return cipher, cc_mode, cleartext_mode
+        return None
+    out: dict[str, str] = {}
+    for token in text.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        out[key] = value
+    return out
+
+
+def encode_transport_hello(client_pub: bytes, cipher: str, cc_mode: str, cleartext_mode: str) -> bytes:
+    return encode_ascii_record(
+        HELLO_PREFIX,
+        pub=b64u(client_pub),
+        cipher=cipher,
+        cc=cc_mode,
+        ct=cleartext_mode,
+    )
 
 
 def load_tofu(path: str) -> dict[str, str]:
@@ -253,7 +253,6 @@ def main() -> None:
     ordered_release_at = time.time() + (args.reorder_buffer_ms / 1000.0)
     reorder_lock = threading.Lock()
     last_gap_log = 0.0
-    last_rtt_log_ts = 0.0
 
     def reset_local_stream_state(reason: str) -> None:
         nonlocal out_by_pos, next_out_pos, ordered_release_at, last_gap_log, stream_resync_needed
@@ -295,24 +294,19 @@ def main() -> None:
                 while time.time() < deadline and running:
                     try:
                         if prefer_resume and local_session_id:
-                            hello_payload = RESUME_PREFIX + local_session_id.encode("ascii")
+                            hello_payload = encode_ascii_record(RESUME_PREFIX, session=local_session_id)
                         elif local_challenge_token and local_session_id:
-                            hello_payload = (
-                                RESPONSE_PREFIX
-                                + local_challenge_token.encode("ascii")
-                                + b"\0"
-                                + local_session_id.encode("ascii")
-                                + b"\0"
-                                + selected_cipher.encode("ascii")
-                                + b"\0cc="
-                                + args.congestion_control.encode("ascii")
-                                + b"\0ct="
-                                + args.cleartext.encode("ascii")
-                                + b"\0"
-                                + client_pub
+                            hello_payload = encode_ascii_record(
+                                RESPONSE_PREFIX,
+                                token=local_challenge_token,
+                                session=local_session_id,
+                                cipher=selected_cipher,
+                                cc=args.congestion_control,
+                                ct=args.cleartext,
+                                pub=b64u(client_pub),
                             )
                         else:
-                            hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext, HELLO_PREFIX)
+                            hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext)
                         usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
                     except OSError as exc:
                         if is_temporary_network_error(exc):
@@ -329,21 +323,24 @@ def main() -> None:
                             temp_network_blocked = True
                             break
                         raise
+                    if addr != peer_candidate:
+                        continue
                     pkt = parse_packet(raw)
                     if not pkt:
                         continue
                     if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
-                        peer_candidate = addr
-                        recv_candidate.peer = addr
-                        rest = pkt.payload[len(CHALLENGE_PREFIX) :]
-                        parts = rest.split(b"\0", 5)
-                        if len(parts) != 6 or len(parts[5]) != 32:
+                        fields = parse_ascii_record(pkt.payload, CHALLENGE_PREFIX)
+                        if not fields:
                             continue
-                        token = parts[0].decode("ascii", "replace")
-                        new_session_id = parts[1].decode("ascii", "replace")
-                        session_cipher, negotiated_cc, negotiated_cleartext = parse_hello_options(parts[2] + b"\0" + parts[3] + b"\0" + parts[4])
-                        session_cipher = session_cipher or selected_cipher
-                        server_pub = parts[5]
+                        token = fields.get("token", "")
+                        new_session_id = fields.get("session", "")
+                        session_cipher = normalize_cipher_name(fields.get("cipher", selected_cipher))
+                        negotiated_cc = fields.get("cc") or "off"
+                        negotiated_cleartext = fields.get("ct") or "off"
+                        try:
+                            server_pub = b64u_decode(fields["pub"])
+                        except Exception:
+                            continue
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
                         if negotiated_cc not in ("on", "off"):
@@ -353,22 +350,17 @@ def main() -> None:
                         if negotiated_cleartext != args.cleartext:
                             raise SystemExit(f"Server negotiated unexpected cleartext mode {negotiated_cleartext}; expected {args.cleartext}")
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
-                        reply = (
-                            RESPONSE_PREFIX
-                            + token.encode("ascii")
-                            + b"\0"
-                            + new_session_id.encode("ascii")
-                            + b"\0"
-                            + session_cipher.encode("ascii")
-                            + b"\0cc="
-                            + negotiated_cc.encode("ascii")
-                            + b"\0ct="
-                            + negotiated_cleartext.encode("ascii")
-                            + b"\0"
-                            + client_pub
+                        reply = encode_ascii_record(
+                            RESPONSE_PREFIX,
+                            token=token,
+                            session=new_session_id,
+                            cipher=selected_cipher,
+                            cc=args.congestion_control,
+                            ct=args.cleartext,
+                            pub=b64u(client_pub),
                         )
                         try:
-                            usock_candidate.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), addr)
+                            usock_candidate.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), peer_candidate)
                         except OSError as exc:
                             if is_temporary_network_error(exc):
                                 continue
@@ -377,16 +369,17 @@ def main() -> None:
                         local_session_id = new_session_id
                         continue
                     if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
-                        peer_candidate = addr
-                        recv_candidate.peer = addr
-                        rest = pkt.payload[len(SESSION_PREFIX) :]
-                        parts = rest.split(b"\0", 4)
-                        if len(parts) != 5 or len(parts[4]) != 32:
+                        fields = parse_ascii_record(pkt.payload, SESSION_PREFIX)
+                        if not fields:
                             continue
-                        new_session_id = parts[0].decode("ascii", "replace")
-                        session_cipher, negotiated_cc, negotiated_cleartext = parse_hello_options(parts[1] + b"\0" + parts[2] + b"\0" + parts[3])
-                        session_cipher = session_cipher or selected_cipher
-                        server_pub = parts[4]
+                        new_session_id = fields.get("session", "")
+                        session_cipher = normalize_cipher_name(fields.get("cipher", selected_cipher))
+                        negotiated_cc = fields.get("cc") or "off"
+                        negotiated_cleartext = fields.get("ct") or "off"
+                        try:
+                            server_pub = b64u_decode(fields["pub"])
+                        except Exception:
+                            continue
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
                         if negotiated_cc not in ("on", "off"):
@@ -398,14 +391,15 @@ def main() -> None:
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
-                        usock_candidate.set_peer_psk(addr, session_key, session_cipher, cleartext=(negotiated_cleartext == "on"))
+                        usock_candidate.set_peer_psk(peer_candidate, session_key, session_cipher, cleartext=(negotiated_cleartext == "on"))
                         print(f"[USTP-CLIENT] session ready cipher={session_cipher} cc={negotiated_cc} cleartext={negotiated_cleartext} session={new_session_id}")
+                        recv_candidate.peer = peer_candidate
                         with state_lock:
                             old_raw = raw_usock
                             old_session_id = session_id
                             raw_usock = raw_candidate
                             usock = usock_candidate
-                            peer = addr
+                            peer = peer_candidate
                             recv = recv_candidate
                             active_family = family
                             session_ready = True
@@ -421,7 +415,7 @@ def main() -> None:
                                 old_raw.close()
                             except Exception:
                                 pass
-                        print(f"[USTP-CLIENT] transport connected peer={addr[0]}:{addr[1]} family={'IPv6' if family == socket.AF_INET6 else 'IPv4'} session={new_session_id} protocol=USTP/1.1")
+                        print(f"[USTP-CLIENT] transport connected peer={peer_candidate[0]}:{peer_candidate[1]} family={'IPv6' if family == socket.AF_INET6 else 'IPv4'} session={new_session_id}")
                         ready = True
                         break
                 if ready:
@@ -522,27 +516,21 @@ def main() -> None:
                 continue
             with key_lock:
                 if local_session_ready and local_session_id:
-                    hello_payload = RTT_PROBE_PREFIX + struct.pack("!Q", time.monotonic_ns())
+                    hello_payload = encode_ascii_record(RESUME_PREFIX, session=local_session_id)
                 elif local_challenge_token and local_session_id:
-                    hello_payload = (
-                        RESPONSE_PREFIX
-                        + local_challenge_token.encode("ascii")
-                        + b"\0"
-                        + local_session_id.encode("ascii")
-                        + b"\0"
-                        + selected_cipher.encode("ascii")
-                        + b"\0cc="
-                        + args.congestion_control.encode("ascii")
-                        + b"\0ct="
-                        + args.cleartext.encode("ascii")
-                        + b"\0"
-                        + client_pub
+                    hello_payload = encode_ascii_record(
+                        RESPONSE_PREFIX,
+                        token=local_challenge_token,
+                        session=local_session_id,
+                        cipher=selected_cipher,
+                        cc=args.congestion_control,
+                        ct=args.cleartext,
+                        pub=b64u(client_pub),
                     )
                 else:
-                    hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext, HELLO_PREFIX)
+                    hello_payload = encode_transport_hello(client_pub, selected_cipher, args.congestion_control, args.cleartext)
             try:
-                raw_hello = mkp(TYPE_HELLO, payload=hello_payload).to_bytes()
-                local_usock.send_plain(raw_hello, local_peer)
+                local_usock.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), local_peer)
                 last_kex_ts = time.time()
             except OSError as exc:
                 if not is_temporary_network_error(exc):
@@ -568,7 +556,6 @@ def main() -> None:
     def recv_loop() -> None:
         nonlocal next_out_pos, last_gap_log, last_rx_ts, last_valid_data_ts, ordered_release_at, stream_resync_needed
         nonlocal session_ready, session_id, challenge_token
-        nonlocal last_rtt_log_ts
         nonlocal running
         local_epoch = -1
         while running:
@@ -607,15 +594,18 @@ def main() -> None:
                 continue
             last_rx_ts = time.time()
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(CHALLENGE_PREFIX):
-                rest = pkt.payload[len(CHALLENGE_PREFIX) :]
-                parts = rest.split(b"\0", 5)
-                if len(parts) != 6 or len(parts[5]) != 32:
+                fields = parse_ascii_record(pkt.payload, CHALLENGE_PREFIX)
+                if not fields:
                     continue
-                token = parts[0].decode("ascii", "replace")
-                new_session_id = parts[1].decode("ascii", "replace")
-                session_cipher, negotiated_cc, negotiated_cleartext = parse_hello_options(parts[2] + b"\0" + parts[3] + b"\0" + parts[4])
-                session_cipher = session_cipher or selected_cipher
-                server_pub = parts[5]
+                token = fields.get("token", "")
+                new_session_id = fields.get("session", "")
+                session_cipher = normalize_cipher_name(fields.get("cipher", selected_cipher))
+                negotiated_cc = fields.get("cc") or "off"
+                negotiated_cleartext = fields.get("ct") or "off"
+                try:
+                    server_pub = b64u_decode(fields["pub"])
+                except Exception:
+                    continue
                 if session_cipher != selected_cipher:
                     raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
                 if negotiated_cc not in ("on", "off"):
@@ -625,19 +615,14 @@ def main() -> None:
                 if negotiated_cleartext != args.cleartext:
                     raise SystemExit(f"Server negotiated unexpected cleartext mode {negotiated_cleartext}; expected {args.cleartext}")
                 check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
-                reply = (
-                    RESPONSE_PREFIX
-                    + token.encode("ascii")
-                    + b"\0"
-                    + new_session_id.encode("ascii")
-                    + b"\0"
-                    + session_cipher.encode("ascii")
-                    + b"\0cc="
-                    + negotiated_cc.encode("ascii")
-                    + b"\0ct="
-                    + negotiated_cleartext.encode("ascii")
-                    + b"\0"
-                    + client_pub
+                reply = encode_ascii_record(
+                    RESPONSE_PREFIX,
+                    token=token,
+                    session=new_session_id,
+                    cipher=selected_cipher,
+                    cc=args.congestion_control,
+                    ct=args.cleartext,
+                    pub=b64u(client_pub),
                 )
                 try:
                     local_usock.send_plain(mkp(TYPE_HELLO, payload=reply).to_bytes(), local_peer)
@@ -648,32 +633,17 @@ def main() -> None:
                 challenge_token = token
                 session_id = new_session_id
                 continue
-            if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(RTT_PROBE_PREFIX):
-                echoed = pkt.payload[len(RTT_PROBE_PREFIX) :]
-                if len(echoed) == 8:
-                    sent_ns = struct.unpack("!Q", echoed)[0]
-                    sample = (time.monotonic_ns() - sent_ns) / 1_000_000_000.0
-                    if 0.0 < sample <= 3.0:
-                        with state_lock:
-                            local_recv = recv
-                        if local_recv is not None:
-                            local_recv.observe_rtt(sample)
-                            now_mono = time.monotonic()
-                            if running and now_mono - last_rtt_log_ts >= 1.0:
-                                print(
-                                    f"[USTP-CLIENT] HELLO RTT={local_recv.path_srtt * 1000.0:.1f}ms "
-                                    f"reorder_grace={local_recv.reorder_grace * 1000.0:.1f}ms"
-                                )
-                                last_rtt_log_ts = now_mono
-                continue
             if pkt.pkt_type == TYPE_HELLO and pkt.payload.startswith(SESSION_PREFIX):
-                rest = pkt.payload[len(SESSION_PREFIX) :]
-                parts = rest.split(b"\0", 4)
-                if len(parts) == 5 and len(parts[4]) == 32:
-                    new_session_id = parts[0].decode("ascii", "replace")
-                    session_cipher, negotiated_cc, negotiated_cleartext = parse_hello_options(parts[1] + b"\0" + parts[2] + b"\0" + parts[3])
-                    session_cipher = session_cipher or selected_cipher
-                    server_pub = parts[4]
+                fields = parse_ascii_record(pkt.payload, SESSION_PREFIX)
+                if fields:
+                    new_session_id = fields.get("session", "")
+                    session_cipher = normalize_cipher_name(fields.get("cipher", selected_cipher))
+                    negotiated_cc = fields.get("cc") or "off"
+                    negotiated_cleartext = fields.get("ct") or "off"
+                    try:
+                        server_pub = b64u_decode(fields["pub"])
+                    except Exception:
+                        continue
                     with key_lock:
                         if session_cipher != selected_cipher:
                             raise SystemExit(f"Server negotiated unexpected cipher {session_cipher}; expected {selected_cipher}")
@@ -693,10 +663,7 @@ def main() -> None:
                         challenge_token = None
                         last_valid_data_ts = time.time()
                     if running:
-                        print(
-                            f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher} "
-                            f"cc={negotiated_cc} cleartext={negotiated_cleartext} protocol=USTP/1.1"
-                        )
+                        print(f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher} cc={negotiated_cc} cleartext={negotiated_cleartext}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:
                 continue
@@ -707,18 +674,6 @@ def main() -> None:
             with state_lock:
                 local_recv = recv
             if local_recv is not None:
-                is_duplicate = pkt.seq in local_recv.received_seq
-                was_requested = pkt.seq in local_recv.nack_ts
-                if is_duplicate:
-                    print(f"[USTP-CLIENT] DUPLICATE seq={pkt.seq}: packet already received; discarded")
-                    local_recv.handle_data(pkt)
-                    continue
-                expected_seq = local_recv.last_max_seq + 1 if local_recv.last_max_seq else pkt.seq
-                if pkt.seq != expected_seq and not was_requested:
-                    print(
-                        f"[USTP-CLIENT] UNORD seq={pkt.seq} expected={expected_seq}: "
-                        "packet received out of order; no retransmission needed for this packet"
-                    )
                 local_recv.handle_data(pkt)
             if args.output_mode == "udp" and args.udp_unordered_live:
                 output_send(pkt.payload)
