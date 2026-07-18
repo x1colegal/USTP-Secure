@@ -125,7 +125,7 @@ Example:
 - It is also not used as a nonce, not used as an ACK/NACK MAC key by itself, and not reused as packet payload state.
 
 ## MTU, PMTU, and fragmentation
-- Current `UPACK` DATA payload limit: `1200` bytes.
+- Current `UPACK` DATA payload limit: `900` bytes.
 - `UPACK` fixed header: `20` bytes.
 - Outer `USS1` secure envelope overhead in AEAD mode:
   - `4` bytes magic

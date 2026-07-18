@@ -7,6 +7,7 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
@@ -144,7 +145,10 @@ def resolve_peer_candidates(host: str, port: int):
         return [(family, sockaddr)]
     except ValueError:
         pass
-    infos = socket.getaddrinfo(normalized, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+    try:
+        infos = socket.getaddrinfo(normalized, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+    except socket.gaierror:
+        return []
     candidates = []
     seen = set()
     for family in (socket.AF_INET6, socket.AF_INET):
@@ -279,10 +283,9 @@ def main() -> None:
 
         local_session_id = session_id
         local_challenge_token = challenge_token
-        temp_network_blocked = False
-
         for idx, (family, sockaddr) in enumerate(candidates):
             raw_candidate = None
+            family_temporarily_unavailable = False
             try:
                 raw_candidate = bind_udp_socket(args.bind_ip, args.bind_port, family)
                 raw_candidate.settimeout(0.2)
@@ -290,7 +293,7 @@ def main() -> None:
                 peer_candidate = sockaddr
                 recv_candidate = USTPReceiver(sock=usock_candidate, peer=peer_candidate)
                 ready = False
-                deadline = time.time() + (0.7 if prefer_resume else 2.0)
+                deadline = time.time() + (0.7 if prefer_resume else 3.0)
                 while time.time() < deadline and running:
                     try:
                         if prefer_resume and local_session_id:
@@ -310,7 +313,7 @@ def main() -> None:
                         usock_candidate.send_plain(mkp(TYPE_HELLO, payload=hello_payload).to_bytes(), peer_candidate)
                     except OSError as exc:
                         if is_temporary_network_error(exc):
-                            temp_network_blocked = True
+                            family_temporarily_unavailable = True
                             break
                         raise
 
@@ -320,7 +323,7 @@ def main() -> None:
                         continue
                     except OSError as exc:
                         if is_recoverable_socket_error(exc):
-                            temp_network_blocked = True
+                            family_temporarily_unavailable = True
                             break
                         raise
                     if addr != peer_candidate:
@@ -422,7 +425,7 @@ def main() -> None:
                     return True
             except OSError as exc:
                 if is_temporary_network_error(exc):
-                    temp_network_blocked = True
+                    family_temporarily_unavailable = True
                 else:
                     raise
             finally:
@@ -434,15 +437,14 @@ def main() -> None:
                             raw_candidate.close()
                         except Exception:
                             pass
-            if temp_network_blocked:
-                break
             if idx + 1 < len(candidates):
-                print(f"[USTP-CLIENT] fallback to next address after trying {sockaddr[0]}")
-        last_recovery_was_temp_network = temp_network_blocked
+                reason = "temporary network error" if family_temporarily_unavailable else "timeout/no reply"
+                print(f"[USTP-CLIENT] fallback to next address after trying {sockaddr[0]} ({reason})")
+        last_recovery_was_temp_network = False
         return False
 
     if not connect_transport(prefer_resume=False):
-        raise SystemExit("No USTPS session established (AAAA and A attempts failed)")
+        raise SystemExit(f"No USTPS session established for {args.peer_ip}:{args.peer_port}")
 
     with state_lock:
         local = usock.getsockname()
@@ -516,7 +518,7 @@ def main() -> None:
                 continue
             with key_lock:
                 if local_session_ready and local_session_id:
-                    hello_payload = encode_ascii_record(RESUME_PREFIX, session=local_session_id)
+                    hello_payload = b"HELLO: keepalive"
                 elif local_challenge_token and local_session_id:
                     hello_payload = encode_ascii_record(
                         RESPONSE_PREFIX,
@@ -656,13 +658,16 @@ def main() -> None:
                         check_tofu(args.tofu_file, tofu_label, server_pub, allow_regen=args.regen_key)
                         server_public = x25519.X25519PublicKey.from_public_bytes(server_pub)
                         session_key = derive_session_key(client_private.exchange(server_public), client_pub, server_pub)
+                    with state_lock:
+                        same_session = session_ready and session_id == new_session_id
                     local_usock.set_peer_psk(local_peer, session_key, session_cipher, cleartext=(negotiated_cleartext == "on"))
                     with state_lock:
                         session_ready = True
                         session_id = new_session_id
                         challenge_token = None
                         last_valid_data_ts = time.time()
-                    if running:
+                        last_rx_ts = time.time()
+                    if running and not same_session:
                         print(f"[USTP-CLIENT] session={session_id} aead cipher={session_cipher} cc={negotiated_cc} cleartext={negotiated_cleartext}")
                 continue
             if pkt.pkt_type == TYPE_CLOSE:

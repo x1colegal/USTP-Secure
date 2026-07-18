@@ -266,6 +266,9 @@ def main() -> None:
     sessions_by_id: dict[str, ClientSession] = {}
     pending_challenges: dict[tuple[str, int], PendingChallenge] = {}
     sessions_lock = threading.Lock()
+    ffmpeg_read_size = MAX_PAYLOAD
+    stream_buffer = bytearray()
+    stream_buffer_first_ts = 0.0
 
     print(
         f"[USTP-SERVER] listen={args.bind_ip}:{args.bind_port} default-aead={selected_cipher or 'auto'} cleartext={args.cleartext} multi-client=on"
@@ -515,55 +518,88 @@ def main() -> None:
                 time.sleep(0.2)
                 continue
 
-            chunk = proc.stdout.read(MAX_PAYLOAD)
-            if not chunk:
+            try:
+                read_chunk = proc.stdout.read(ffmpeg_read_size)
+            except BlockingIOError:
+                continue
+            if not read_chunk:
                 try:
                     proc.terminate()
                 except Exception:
                     pass
                 proc = None
                 continue
+            if not stream_buffer:
+                stream_buffer_first_ts = time.time()
+            stream_buffer.extend(read_chunk)
 
             now = time.time()
             with sessions_lock:
                 snapshot = list(sessions.items())
 
+            active_snapshot: list[tuple[tuple[str, int], ClientSession, dict[str, float]]] = []
             for addr, session in snapshot:
                 try:
                     stats = session.sender.get_stats()
-                    if stats["pending"] > args.max_pending_packets and stats["last_progress_age"] > args.stalled_progress_timeout:
-                        session.sender.drop_backlog_keep_sequence()
-                        print(
-                            f"[USTP-SERVER] stalled backlog dropped {addr[0]}:{addr[1]} "
-                            f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
-                            f"last_progress={stats['last_progress_age']:.1f}s"
-                        )
-                        continue
-                    if (now - session.last_seen_ts) > 180.0:
+                    active_snapshot.append((addr, session, stats))
+                except Exception:
+                    continue
+
+            if not active_snapshot:
+                if len(stream_buffer) > ffmpeg_read_size:
+                    del stream_buffer[:-ffmpeg_read_size]
+                    stream_buffer_first_ts = time.time() if stream_buffer else 0.0
+                continue
+
+            while stream_buffer:
+                should_flush_partial = (
+                    len(stream_buffer) < MAX_PAYLOAD
+                    and stream_buffer_first_ts > 0.0
+                    and (time.time() - stream_buffer_first_ts) >= 0.020
+                )
+                if len(stream_buffer) < MAX_PAYLOAD and not should_flush_partial:
+                    break
+
+                chunk_len = min(len(stream_buffer), MAX_PAYLOAD)
+                chunk = bytes(stream_buffer[:chunk_len])
+                del stream_buffer[:chunk_len]
+                stream_buffer_first_ts = time.time() if stream_buffer else 0.0
+
+                for addr, session, stats in active_snapshot:
+                    try:
+                        if stats["pending"] > args.max_pending_packets and stats["last_progress_age"] > args.stalled_progress_timeout:
+                            session.sender.drop_backlog_keep_sequence()
+                            print(
+                                f"[USTP-SERVER] stalled backlog dropped {addr[0]}:{addr[1]} "
+                                f"pending={int(stats['pending'])} inflight={int(stats['inflight'])} "
+                                f"last_progress={stats['last_progress_age']:.1f}s payload_size={MAX_PAYLOAD}"
+                            )
+                            continue
+                        if (now - session.last_seen_ts) > 180.0:
+                            with sessions_lock:
+                                current = sessions.get(addr)
+                                if current is session:
+                                    session.sender.stop()
+                                    sock.clear_peer(addr)
+                                    sessions_by_id.pop(session.session_id, None)
+                                    del sessions[addr]
+                                    print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]} last_seen={now - session.last_seen_ts:.1f}s")
+                            continue
+                        stream_pos = session.next_stream_pos
+                        session.next_stream_pos += len(chunk)
+                        session.sender.queue_payload(chunk, stream_pos=stream_pos)
+                    except Exception:
+                        print(f"[USTP-SERVER] session send error {addr[0]}:{addr[1]}:")
+                        traceback.print_exc()
                         with sessions_lock:
                             current = sessions.get(addr)
                             if current is session:
-                                session.sender.stop()
-                                sock.clear_peer(addr)
-                                sessions_by_id.pop(session.session_id, None)
-                                del sessions[addr]
-                                print(f"[USTP-SERVER] client idle removed {addr[0]}:{addr[1]} last_seen={now - session.last_seen_ts:.1f}s")
-                        continue
-                    stream_pos = session.next_stream_pos
-                    session.next_stream_pos += len(chunk)
-                    session.sender.queue_payload(chunk, stream_pos=stream_pos)
-                except Exception:
-                    print(f"[USTP-SERVER] session send error {addr[0]}:{addr[1]}:")
-                    traceback.print_exc()
-                    with sessions_lock:
-                        current = sessions.get(addr)
-                        if current is session:
-                            try:
-                                session.sender.stop()
-                                sock.clear_peer(addr)
-                                sessions_by_id.pop(session.session_id, None)
-                            finally:
-                                sessions.pop(addr, None)
+                                try:
+                                    session.sender.stop()
+                                    sock.clear_peer(addr)
+                                    sessions_by_id.pop(session.session_id, None)
+                                finally:
+                                    sessions.pop(addr, None)
     except KeyboardInterrupt:
         print("[USTP-SERVER] Interrupted")
     finally:
