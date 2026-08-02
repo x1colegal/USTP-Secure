@@ -112,7 +112,7 @@ This repository, however, is focused specifically on **streaming over USTP**.
 - Flow:
   - client sends `HELLO`
   - server replies with `USTPS-CHALLENGE1` carrying `token`, `session_id`, selected cipher, negotiated congestion-control mode, negotiated `DATA` protection mode, and server public key
-  - client echoes that token back in `USTP-CHALLENGE-REPLY1`
+  - client echoes that token back in `USTPS-CHALLENGE-REPLY1`
   - only then does the server create the session and send `USTPS-SESSION1`
 - Purpose:
   - prove that the sender at that source `IP:port` can actually receive packets there
@@ -122,6 +122,18 @@ This repository, however, is focused specifically on **streaming over USTP**.
 - It is only a reachability proof and handshake gate before the real USTP session is created.
 - It is also not used as a nonce, not used as an ACK/NACK MAC key by itself, and not reused as packet payload state.
 
+## Historical protocol identifiers
+- The project name is now `USTP`, but several on-wire ASCII identifiers still use the historical `USTPS-*` prefix.
+- This is intentional for backward compatibility with existing implementations, captures, logs, and older deployments.
+- In the current implementation, the following control identifiers remain on the wire:
+  - `USTPS-KEX1`
+  - `USTPS-CHALLENGE1`
+  - `USTPS-CHALLENGE-REPLY1`
+  - `USTPS-SESSION1`
+  - `USTPS-RESUME1`
+  - `USTPS-RTT1`
+- The project/documentation name changed back to `USTP`, but those historical wire identifiers were not renamed in the protocol bytes.
+
 ## MTU, PMTU, and fragmentation
 - Current `UPACK` DATA payload limit: `900` bytes.
 - `UPACK` fixed header: `20` bytes.
@@ -130,13 +142,13 @@ This repository, however, is focused specifically on **streaming over USTP**.
   - `1` byte cipher id
   - `12` bytes AEAD nonce
   - `16` bytes AEAD tag
-- So the encrypted USTP DATA datagram is about `1253` bytes before IP/UDP headers.
+- So the encrypted USTP DATA datagram is about `953` bytes before UDP/IP headers.
 - Outer `USC1` cleartext envelope overhead in cleartext mode:
   - `4` bytes magic
   - `16` bytes HMAC tag
-- So the cleartext USTP DATA datagram is about `1240` bytes before IP/UDP headers.
-- With IPv4 + UDP headers, that is about `1281` bytes on the wire.
-- With IPv6 + UDP headers, that is about `1301` bytes on the wire.
+- So the cleartext USTP DATA datagram is about `940` bytes before UDP/IP headers.
+- With IPv4 + UDP headers, that is about `981` bytes on the wire in AEAD mode and about `968` bytes in cleartext mode.
+- With IPv6 + UDP headers, that is about `1001` bytes on the wire in AEAD mode and about `988` bytes in cleartext mode.
 - USTP currently does **not** implement transport-level fragmentation.
 - USTP currently does **not** implement PMTU discovery.
 - The implementation instead uses a fixed conservative payload ceiling.
@@ -221,7 +233,7 @@ This repository, however, is focused specifically on **streaming over USTP**.
 ## Ordered Output Warning
 - USTP can receive packets out of order at the transport layer.
 - That behavior is possible, but it is not the recommended final application model for this repository.
-- This project is intended to use USTP as a transport that can accept later packets without transport-level blocking, while the application/output layer rebuilds the logical order when it needs a byte stream or player-friendly output.
+- This project is intended to use USTP as a transport that can accept later packets without transport-level blocking, while the application/output layer normally rebuilds the logical order with `stream_pos` when it needs a byte stream or player-friendly output.
 - If you expose raw out-of-order media chunks directly to a normal player or byte-stream consumer, behavior may be corrupted, incomplete, or unstable.
 - For that reason, direct unordered final output is not encouraged here except for very specific experiments.
 - This is also why `--udp-unordered-live` is documented separately as dangerous.
@@ -232,6 +244,7 @@ This repository, however, is focused specifically on **streaming over USTP**.
 - Treat USTP as a reliable transport with stream position metadata.
 - Do not assume packet arrival order is the real stream order.
 - Use `stream_pos` to rebuild ordered output when your application needs a byte stream.
+- In the normal model, the transport remains unordered and the application reorders with `stream_pos`.
 - If your application needs ordered output, keep a reorder buffer keyed by `stream_pos` and release data only when the required positions are available.
 - Do not rebuild ordering by `seq`; use `seq` only for transport reliability logic.
 
@@ -355,10 +368,15 @@ VLC:
 tcp://127.0.0.1:1238
 ```
 
-## USTP vs USTP
-- USTP: reliable UDP transport, no encryption by default.
-- USTP: same UDP transport plus authenticated `DATA` protection, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
-- Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
+## Current USTP profile
+- This repository documents the current authenticated USTP profile implemented here.
+- In this profile, USTP provides:
+  - reliable UDP transport
+  - authenticated `DATA` protection
+  - human-readable plaintext transport control
+  - challenge validation before data flow
+  - endpoint-bound sessions
+- The client exits with explicit error if no valid protected packets are received after the handshake finishes.
 
 ## Internet-Drafts
 - `USTP` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
