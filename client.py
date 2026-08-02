@@ -460,15 +460,31 @@ def main() -> None:
     tune_udp_socket(usock_out)
 
     if args.output_mode == "tcp":
-        tsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        tsock.bind((args.tcp_host, args.tcp_port))
-        tsock.listen(5)
+        tcp_listeners: list[socket.socket] = []
 
-        def accept_loop() -> None:
+        def add_tcp_listener(family: int, bind_addr) -> None:
+            tsock = socket.socket(family, socket.SOCK_STREAM)
+            tsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                try:
+                    tsock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                except OSError:
+                    pass
+            tsock.bind(bind_addr)
+            tsock.listen(5)
+            tcp_listeners.append(tsock)
+
+        add_tcp_listener(socket.AF_INET, (args.tcp_host, args.tcp_port))
+        if args.tcp_host == "127.0.0.1":
+            try:
+                add_tcp_listener(socket.AF_INET6, ("::1", args.tcp_port, 0, 0))
+            except OSError as exc:
+                print(f"[USTP-CLIENT] IPv6 localhost listener unavailable: {exc}")
+
+        def accept_loop(listener: socket.socket) -> None:
             while running:
                 try:
-                    c, a = tsock.accept()
+                    c, a = listener.accept()
                 except Exception:
                     if running:
                         continue
@@ -720,7 +736,8 @@ def main() -> None:
                         )
 
     if args.output_mode == "tcp":
-        threads.append(threading.Thread(target=accept_loop, daemon=True, name="ustps-accept"))
+        for idx, listener in enumerate(tcp_listeners):
+            threads.append(threading.Thread(target=accept_loop, args=(listener,), daemon=True, name=f"ustps-accept-{idx}"))
     threads.append(threading.Thread(target=keepalive_loop, daemon=True, name="ustps-keepalive"))
     threads.append(threading.Thread(target=nack_loop, daemon=True, name="ustps-nack"))
     threads.append(threading.Thread(target=recv_loop, daemon=True, name="ustps-recv"))
@@ -729,6 +746,8 @@ def main() -> None:
 
     if args.output_mode == "tcp":
         print(f"[USTP-CLIENT] TCP output on tcp://{args.tcp_host}:{args.tcp_port}")
+        if args.tcp_host == "127.0.0.1":
+            print(f"[USTP-CLIENT] TCP output also on tcp://[::1]:{args.tcp_port}")
     else:
         print(f"[USTP-CLIENT] UDP output on udp://{args.udp_ip}:{args.udp_port}")
 
@@ -749,6 +768,12 @@ def main() -> None:
         print("[USTP-CLIENT] Interrupted")
     finally:
         running = False
+        if args.output_mode == "tcp":
+            for listener in tcp_listeners:
+                try:
+                    listener.close()
+                except Exception:
+                    pass
         with state_lock:
             local_raw = raw_usock
             local_usock = usock
