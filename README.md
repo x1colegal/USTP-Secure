@@ -8,7 +8,7 @@ By default, USTP uses AEAD for `DATA`.
 
 It also supports an optional negotiated `cleartext + HMAC` mode for `DATA`, where payload bytes are visible on the wire but tampering is detected and rejected.
 
-USTP now supports an optional congestion controller called `USTP Congestion`. It is still UDP-first and still keeps unordered delivery, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
+USTP now supports an optional congestion controller called `USTP Congestion`. It is still UDP-first, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
 
 Status: **Beta**
 
@@ -84,22 +84,14 @@ This repository, however, is focused specifically on **streaming over USTP**.
   - readable control lines for transport control
 
 ## Transport model
-- USTP is reliable over UDP, but it is **unordered by design**.
 - USTP can run with optional `USTP Congestion`, negotiated during the handshake.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
 - In the current implementation, `seq` is a 32-bit counter that starts at `1` for each fresh session.
 - In the current implementation, `stream_pos` is a 64-bit byte counter that starts at `0` for each fresh logical stream.
-- The receiver accepts out-of-order packets immediately instead of blocking delivery behind one missing packet.
-- USTP can physically receive everything out of order, but that is not the encouraged final application model in this repo.
-- The intended model is: unordered at the transport layer, ordered again at the application/output layer when the application needs a byte stream or player-friendly flow.
+- The receiver accepts packets immediately instead of blocking delivery behind one missing packet.
 
-Example:
-- Physical arrival: `1 2 3 5 6`
-- Packet `4` is missing, so the receiver buffers the gap information and sends `RETRANSMIT_REQUEST` for `4`.
-- Packets `5` and `6` are still accepted immediately.
-- When packet `4` arrives later, the application can reconstruct the logical order by using `stream_pos`, not by trusting arrival order.
 
 ## Handshake and session model
 - The client starts with a plaintext transport `HELLO` carrying its X25519 public key, requested cipher, requested congestion-control mode (`on` or `off`), and requested `DATA` protection mode (`cleartext on|off`).
@@ -226,21 +218,20 @@ Example:
 - `no data for 10s`: the client did not receive stream data for long enough and exits so a new clean session can be started.
 - `stream state reset`: the client cleared local reorder/gap state after a clean new stream/session boundary.
 
-## Why it does not have HoL blocking
-- TCP has transport-level Head-of-Line blocking: if one segment is missing, later data in the same byte stream cannot be delivered to the application yet.
-- USTP does not do that at the transport layer.
-- A missing packet does not stop later packets from being received, ACKed, buffered, or passed upward.
-- That is why USTP can physically observe flows like `5, 6, 4, 7, 8` while still preserving enough metadata for the application to rebuild the logical order if it wants ordered output.
-
-Important:
-- If your final application output is a strict ordered byte stream, then reordering still has to happen somewhere above USTP.
-- In that case, the application layer may still choose to wait before emitting bytes, but that waiting is an application behavior, not transport-level HoL blocking inside USTP itself.
+## Ordered Output Warning
+- USTP can receive packets out of order at the transport layer.
+- That behavior is possible, but it is not the recommended final application model for this repository.
+- This project is intended to use USTP as a transport that can accept later packets without transport-level blocking, while the application/output layer rebuilds the logical order when it needs a byte stream or player-friendly output.
+- If you expose raw out-of-order media chunks directly to a normal player or byte-stream consumer, behavior may be corrupted, incomplete, or unstable.
+- For that reason, direct unordered final output is not encouraged here except for very specific experiments.
+- This is also why `--udp-unordered-live` is documented separately as dangerous.
+- TCP has transport-level Head-of-Line blocking, while USTP avoids enforcing that ordering inside the transport itself.
+- If your final application output must be ordered, reordering still has to happen above USTP, in the application/output layer.
 
 ## How to integrate USTP into your application
-- Treat USTP as a reliable unordered datagram transport with stream position metadata.
+- Treat USTP as a reliable transport with stream position metadata.
 - Do not assume packet arrival order is the real stream order.
 - Use `stream_pos` to rebuild ordered output when your application needs a byte stream.
-- If your application can consume unordered chunks directly, you can process payloads immediately and avoid ordered buffering entirely.
 - If your application needs ordered output, keep a reorder buffer keyed by `stream_pos` and release data only when the required positions are available.
 - Do not rebuild ordering by `seq`; use `seq` only for transport reliability logic.
 
@@ -254,7 +245,7 @@ Important:
 - QUIC stream behavior:
   Inside one individual QUIC stream, ordering is still enforced. Missing data in that stream blocks later bytes for that same stream.
 - USTP:
-  USTP does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. If `USTP Congestion` is enabled, the sender may slow or speed up, but that does not change the unordered transport model.
+  USTP does not enforce ordered delivery at the transport layer. It relies on `stream_pos` metadata when the application wants to reconstruct ordered output. If `USTP Congestion` is enabled, the sender may slow or speed up, but that does not change the transport model.
 
 ## Server
 ```bash
