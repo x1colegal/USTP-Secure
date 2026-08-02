@@ -1,24 +1,28 @@
-# USTP-Secure (USTPS)
+# USTP
 
-USTPS means **UDP Speedy Transmission Protocol Secure**.
+USTP means **UDP Speedy Transmission Protocol**.
 
-USTP-Secure keeps USTP on UDP and adds authenticated packet protection.
+USTP keeps the same authenticated transport model, but the project name is now simply `USTP` again.
 
-By default, USTPS uses AEAD for `DATA`.
+By default, USTP uses AEAD for `DATA`.
 
 It also supports an optional negotiated `cleartext + HMAC` mode for `DATA`, where payload bytes are visible on the wire but tampering is detected and rejected.
 
-USTPS now supports an optional congestion controller called `USTPS Congestion`. It is still UDP-first and still keeps unordered delivery, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
+USTP now supports an optional congestion controller called `USTP Congestion`. It is still UDP-first and still keeps unordered delivery, but it can optionally slow down and ramp back up when the path starts showing congestion signals.
 
 Status: **Beta**
 
-USTPS is no longer just a proof of concept. It is currently in the Beta phase.
+USTP is no longer just a proof of concept. It is currently in the Beta phase.
 
-USTPS can be used for many kinds of applications and transports.
+USTP can be used for many kinds of applications and transports.
 
-This repository, however, is focused specifically on **streaming over USTPS**.
+This repository, however, is focused specifically on **streaming over USTP**.
 
 ## News
+- `02/08/2026`: `USTP-Secure` is now back to `USTP`.
+  - `USTP-Secure` was an old project name and no longer a good fit for the project.
+  - The shorter `USTP` name is now preferred again.
+  - The full name is now `UDP Speedy Transmission Protocol`, without `Secure` in the title.
 - `2026-07-18`: USTP/2 Beta was removed from the current tree.
   - Real-world behavior was less stable than USTP/1.1 under loss.
   - The current stable transport path is USTP/1.1 only.
@@ -70,24 +74,26 @@ This repository, however, is focused specifically on **streaming over USTPS**.
 - `USS1` means `UDP Speedy Secure`, version 1.
 - `USC1` means `UDP Speedy Clear`, version 1.
 - `UPAK` is the binary `UPACK` DATA frame marker.
-- In USTPS, plaintext control is human-readable ASCII such as `ACK: 10`, `NACK: 42`, `HELLO: ...`, and `CLOSE:`.
-- In USTPS, `UPAK` identifies binary DATA packets after decryption.
-- In USTPS, `USS1` is the outer secure AEAD envelope format.
-- In USTPS, `USC1` is the outer cleartext+HMAC `DATA` envelope format.
+- In USTP, plaintext control is human-readable ASCII such as `ACK: 10`, `NACK: 42`, `HELLO: ...`, and `CLOSE:`.
+- In USTP, `UPAK` identifies binary DATA packets after decryption.
+- In USTP, `USS1` is the outer secure AEAD envelope format.
+- In USTP, `USC1` is the outer cleartext+HMAC `DATA` envelope format.
 - So, on the wire you normally see:
   - `USS1...` for AEAD-protected `DATA`
   - `USC1...` for cleartext+HMAC `DATA`
   - readable control lines for transport control
 
 ## Transport model
-- USTPS is reliable over UDP, but it is **unordered by design**.
-- USTPS can run with optional `USTPS Congestion`, negotiated during the handshake.
+- USTP is reliable over UDP, but it is **unordered by design**.
+- USTP can run with optional `USTP Congestion`, negotiated during the handshake.
 - Packets carry both a transport `seq` and an application-facing `stream_pos`.
 - `seq` is used for ACK, loss detection, retransmission, and `RTT` sampling.
 - `stream_pos` tells the application where the payload belongs in the logical byte stream.
 - In the current implementation, `seq` is a 32-bit counter that starts at `1` for each fresh session.
 - In the current implementation, `stream_pos` is a 64-bit byte counter that starts at `0` for each fresh logical stream.
 - The receiver accepts out-of-order packets immediately instead of blocking delivery behind one missing packet.
+- USTP can physically receive everything out of order, but that is not the encouraged final application model in this repo.
+- The intended model is: unordered at the transport layer, ordered again at the application/output layer when the application needs a byte stream or player-friendly flow.
 
 Example:
 - Physical arrival: `1 2 3 5 6`
@@ -110,18 +116,18 @@ Example:
 - `session_id` is still used as a session label, but it is not accepted from a different `IP:port`.
 
 ## Retry Token
-- USTPS uses a plaintext retry-token step before any encrypted media session is accepted.
+- USTP uses a plaintext retry-token step before any encrypted media session is accepted.
 - Flow:
   - client sends `HELLO`
   - server replies with `USTPS-CHALLENGE1` carrying `token`, `session_id`, selected cipher, negotiated congestion-control mode, negotiated `DATA` protection mode, and server public key
-  - client echoes that token back in `USTPS-CHALLENGE-REPLY1`
+  - client echoes that token back in `USTP-CHALLENGE-REPLY1`
   - only then does the server create the session and send `USTPS-SESSION1`
 - Purpose:
   - prove that the sender at that source `IP:port` can actually receive packets there
   - avoid sending encrypted media immediately to an unvalidated source address
   - bind the final session creation to the endpoint that completed the round-trip
 - The retry token is not the session key.
-- It is only a reachability proof and handshake gate before the real USTPS session is created.
+- It is only a reachability proof and handshake gate before the real USTP session is created.
 - It is also not used as a nonce, not used as an ACK/NACK MAC key by itself, and not reused as packet payload state.
 
 ## MTU, PMTU, and fragmentation
@@ -132,17 +138,17 @@ Example:
   - `1` byte cipher id
   - `12` bytes AEAD nonce
   - `16` bytes AEAD tag
-- So the encrypted USTPS DATA datagram is about `1253` bytes before IP/UDP headers.
+- So the encrypted USTP DATA datagram is about `1253` bytes before IP/UDP headers.
 - Outer `USC1` cleartext envelope overhead in cleartext mode:
   - `4` bytes magic
   - `16` bytes HMAC tag
-- So the cleartext USTPS DATA datagram is about `1240` bytes before IP/UDP headers.
+- So the cleartext USTP DATA datagram is about `1240` bytes before IP/UDP headers.
 - With IPv4 + UDP headers, that is about `1281` bytes on the wire.
 - With IPv6 + UDP headers, that is about `1301` bytes on the wire.
-- USTPS currently does **not** implement transport-level fragmentation.
-- USTPS currently does **not** implement PMTU discovery.
+- USTP currently does **not** implement transport-level fragmentation.
+- USTP currently does **not** implement PMTU discovery.
 - The implementation instead uses a fixed conservative payload ceiling.
-- If IP fragmentation still happens underneath and one fragment is lost, the whole UDP datagram is lost and USTPS recovers it with normal selective retransmission.
+- If IP fragmentation still happens underneath and one fragment is lost, the whole UDP datagram is lost and USTP recovers it with normal selective retransmission.
 
 ## Old and duplicate packets
 - Duplicate packets inside the current session are ignored after their `seq` was already accepted.
@@ -159,9 +165,9 @@ Example:
 - `nonce` is only for AEAD packet protection.
 - Cleartext+HMAC mode does not use an AEAD nonce because it does not use AEAD encryption for `DATA`.
 
-## USTPS Congestion
-- `USTPS Congestion` is optional.
-- It does not change USTPS into an ordered transport and it does not add TCP-style HoL blocking.
+## USTP Congestion
+- `USTP Congestion` is optional.
+- It does not change USTP into an ordered transport and it does not add TCP-style HoL blocking.
 - It only changes how aggressively the sender injects packets into the network.
 - Negotiation model:
   - server: `--congestion-control auto|on|off`
@@ -179,7 +185,7 @@ Example:
   - if `RTT` inflates, `RTO` starts happening, or loss/retransmit pressure rises, it backs off
   - once the path stabilizes again, it slowly ramps back up
 - The sender still uses selective retransmission for missing packets only.
-- `USTPS Congestion` controls rate pressure, not reliability semantics.
+- `USTP Congestion` controls rate pressure, not reliability semantics.
 
 ## Network change support
 - Automatic network/path migration has been removed from this implementation.
@@ -203,7 +209,7 @@ Example:
 - The `MAC:<tag>` value is computed from the session key and is stripped after verification before the packet reaches the transport state machine.
 
 ## Retransmission model
-- USTPS uses selective retransmission, not Go-Back-N.
+- USTP uses selective retransmission, not Go-Back-N.
 - Every unique `DATA` packet is ACKed individually.
 - Missing packets trigger `RETRANSMIT_REQUEST` only for the missing `seq`.
 - The sender keeps sent packets in a retransmission buffer until ACKed.
@@ -222,16 +228,16 @@ Example:
 
 ## Why it does not have HoL blocking
 - TCP has transport-level Head-of-Line blocking: if one segment is missing, later data in the same byte stream cannot be delivered to the application yet.
-- USTPS does not do that at the transport layer.
+- USTP does not do that at the transport layer.
 - A missing packet does not stop later packets from being received, ACKed, buffered, or passed upward.
-- That is why USTPS can physically observe flows like `5, 6, 4, 7, 8` while still preserving enough metadata for the application to rebuild the logical order if it wants ordered output.
+- That is why USTP can physically observe flows like `5, 6, 4, 7, 8` while still preserving enough metadata for the application to rebuild the logical order if it wants ordered output.
 
 Important:
-- If your final application output is a strict ordered byte stream, then reordering still has to happen somewhere above USTPS.
-- In that case, the application layer may still choose to wait before emitting bytes, but that waiting is an application behavior, not transport-level HoL blocking inside USTPS itself.
+- If your final application output is a strict ordered byte stream, then reordering still has to happen somewhere above USTP.
+- In that case, the application layer may still choose to wait before emitting bytes, but that waiting is an application behavior, not transport-level HoL blocking inside USTP itself.
 
-## How to integrate USTPS into your application
-- Treat USTPS as a reliable unordered datagram transport with stream position metadata.
+## How to integrate USTP into your application
+- Treat USTP as a reliable unordered datagram transport with stream position metadata.
 - Do not assume packet arrival order is the real stream order.
 - Use `stream_pos` to rebuild ordered output when your application needs a byte stream.
 - If your application can consume unordered chunks directly, you can process payloads immediately and avoid ordered buffering entirely.
@@ -247,8 +253,8 @@ Important:
   QUIC removes cross-stream HoL blocking between different streams, which is a big improvement over TCP for multiplexed applications.
 - QUIC stream behavior:
   Inside one individual QUIC stream, ordering is still enforced. Missing data in that stream blocks later bytes for that same stream.
-- USTPS:
-  USTPS does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. If `USTPS Congestion` is enabled, the sender may slow or speed up, but that does not change the unordered transport model.
+- USTP:
+  USTP does not enforce ordered delivery at the transport layer. It accepts later packets without waiting for earlier missing ones, and relies on `stream_pos` metadata if the application wants to reconstruct ordered output. If `USTP Congestion` is enabled, the sender may slow or speed up, but that does not change the unordered transport model.
 
 ## Server
 ```bash
@@ -358,14 +364,14 @@ VLC:
 tcp://127.0.0.1:1238
 ```
 
-## USTP vs USTPS
+## USTP vs USTP
 - USTP: reliable UDP transport, no encryption by default.
-- USTPS: same UDP transport plus authenticated `DATA` protection, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
+- USTP: same UDP transport plus authenticated `DATA` protection, human-readable plaintext transport control, challenge validation before data flow, and endpoint-bound sessions.
 - Client exits with explicit error if no valid encrypted packets are received after the handshake finishes.
 
 ## Internet-Drafts
-- `USTPS` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
+- `USTP` Internet-Draft: `https://datatracker.ietf.org/doc/draft-x1co-ustps/`
 
 ## Related projects
-- `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTPS:
+- `USSH`: a shell/remote terminal protocol implemented fully from scratch on top of USTP:
   `https://github.com/x1colegal/USSH`
